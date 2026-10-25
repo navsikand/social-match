@@ -16,6 +16,7 @@ simply not comparable, so they do not affect the score.
 Privacy note: canonical tags are what appear on a card. Raw interests stay attached to
 the student who typed them and are returned to them, but are never shown to anyone else.
 """
+from server import encoder
 from server.schema import TAG_VOCAB
 
 _CANON = frozenset(TAG_VOCAB)
@@ -202,11 +203,21 @@ def normalize_many(raws: list[str]) -> tuple[list[str], list[dict], list[str]]:
     seen: set[str] = set()
     for raw in raws:
         tag = normalize(raw)
+        method = None
+        if tag is None:
+            # Nothing in the tables knew this word. If the learned encoder is up and the word is
+            # close enough to one of our tags, map it there; otherwise it stays unscored.
+            hit = encoder.nearest_tag(raw)
+            if hit is not None:
+                tag, method = hit[0], "encoder"
         if tag is None:
             if raw not in unscored:
                 unscored.append(raw)
             continue
-        mapped.append({"raw": raw, "tag": tag})
+        entry = {"raw": raw, "tag": tag}
+        if method:
+            entry["method"] = method
+        mapped.append(entry)
         if tag not in seen:
             seen.add(tag)
             canonical.append(tag)

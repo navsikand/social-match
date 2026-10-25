@@ -59,6 +59,23 @@ The protocol is OpenAI chat-completions **only**. A non-OpenAI shape (Anthropic 
 completion, a non-SSE body) is a typed `ai_protocol` failure shown to you, never a silently empty reply. Switching
 `AI_API_URL` does not imply compatibility with whatever you point it at.
 
+### Interest similarity encoder (optional)
+
+The matcher can score interests with a sentence encoder that runs **on this server** (not at a provider). Install with
+`uv sync --extra encoder` (pulls sentence-transformers and torch; it uses the GPU when torch sees one). On start the
+server loads the model in a background thread, downloading it into `./.cache` the first time and reusing it after;
+requests are never blocked on it. Without the extra, or with `ENCODER_ENABLED=0`, matching uses the hand-made taxonomy.
+Check the real model without starting the server: `uv run python -m server.encoder` (prints the AUC and sample scores).
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `ENCODER_ENABLED` | `1` | `0` skips the encoder entirely. |
+| `ENCODER_MODEL` | `BAAI/bge-small-en-v1.5` | Any sentence-transformers model name. |
+| `ENCODER_CACHE_DIR` | `./.cache` | Where weights are stored (git-ignored). |
+| `ENCODER_DEVICE` | `auto` | `auto` = cuda if torch sees a GPU, else cpu; or `cuda`, `cpu`. |
+| `ENCODER_MIN_AUC` | `0.80` | Quality gate: below this the encoder is not used. |
+| `ENCODER_MAP_MIN` | `0.85` | How close an unknown free-text word must be to one of our tags to be mapped to it. |
+
 ## Repo layout
 
 | Path | What it is |
@@ -220,6 +237,11 @@ These are limits of what we built, stated plainly. `CONTRACT.md` §16 makes keep
    or train on what it receives, and we cannot promise otherwise, delete it on your behalf, or tell you where it is.
    Do not type secrets. The privacy policy states this in the same terms; nothing here promises provider-side deletion
    or anonymity.
+9. **The similarity encoder is borrowed, and checked only against our own judgments.** The model is a public pretrained
+   one we did not train. Its quality gate and calibration use our taxonomy and a short hand-written probe list, so a pass
+   means "agrees with us on those pairs", not that it understands every student's interests. It is untested on real
+   students, and until `python -m server.encoder` has been run on the deployed box we have not seen its real numbers. It
+   ranks and explains; it cannot override consent, blocks or the time overlap.
 
 ## Documentation
 

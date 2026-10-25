@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from server import config, db, logging as smlog, sweep
+from server import config, db, encoder, logging as smlog, sweep
 from server import (
     activity,
     chat,
@@ -36,6 +36,9 @@ async def lifespan(app: FastAPI):
         (config.ai_api_url() or "").split("/")[2] if config.ai_api_url() else None,
         config.base_url(),
     )
+    # Pull the interest encoder into .cache in the background (never blocks startup). Until it is
+    # ready, or if it cannot load, scoring uses the taxonomy; the encoder logs which and why.
+    encoder.start_background()
     task = asyncio.create_task(sweep.loop())
     nego = None
     if config.ai_api_url() is not None:

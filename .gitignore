@@ -11,3 +11,4 @@ socialmatch.conf
 *.log
 *.sqlite3
 uploads/
+.cache/
