@@ -126,3 +126,16 @@ def chat_ttl_days() -> int:
 def delegation_default_on() -> bool:
     """Demo-box only: seeds the delegation grant at signup. Absent/off by default."""
     return _bool_env("DELEGATION_DEFAULT_ON", False)
+
+
+def matching_default_on() -> bool:
+    """Demo-box only: signup seeds the two grants matchmaking actually requires.
+
+    Chat writes are grant-preserving by design (a turn can never grant anything), so a
+    student who only ever talks to the assistant holds no `matching` grant and no
+    `publication/card` grant — and `matching.generate_for_user` then refuses every pair with
+    `matching_grant_missing_me`, which is exactly "I see no matches" with a stored profile.
+    On the demo box we seed both at signup so the flow is hands-free. Off by default: this is
+    a consent decision, and the real product asks the human (Settings) to make it.
+    """
+    return _bool_env("MATCHING_DEFAULT_ON", False)

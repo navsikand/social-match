@@ -127,7 +127,17 @@ def _upsert_grant(conn, uid: int, kind: str, tier: str | None = None) -> None:
 
 
 def _seed_default_grants(conn, uid: int) -> None:
-    """Demo box: signup seeds the delegation grant (version 1) + its consent row."""
+    """Demo box: signup seeds the delegation grant (version 1) + its consent row.
+
+    With MATCHING_DEFAULT_ON it ALSO seeds the two grants matchmaking requires. Chat turns can
+    never grant anything (grant-preserving by design), so without this a chat-only student is
+    permanently unmatchable: "I have windows stored and I still see no matches".
+    """
+    if config.matching_default_on():
+        _upsert_grant(conn, uid, "matching")
+        # A card grant alone demotes labels to pseudonym; card+name is what a student expects
+        # to see on their own demo. Both are still revocable from Settings at any time.
+        _upsert_grant(conn, uid, "publication", "card")
     if not config.delegation_default_on():
         return
     conn.execute(

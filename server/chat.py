@@ -462,6 +462,20 @@ def _profile_lines(conn, uid: int) -> list[str]:
     busy = "unknown" if payload.busy_load is None else str(payload.busy_load)
     lines.append(f"- Busy load: {busy} (0 = light week, 1 = some, 2 = heavy, 3 = overloaded)")
     lines.append(f"- Public events considered: {len(payload.events)}")
+    # The two switches that decide whether a match can exist at all. The assistant must be able
+    # to say "matching is off" instead of implying a search that will never run.
+    matching_on = (
+        db.one(
+            conn,
+            "SELECT 1 FROM grants WHERE user_id=? AND kind='matching'"
+            " AND withdrawn_at IS NULL AND expires_at > ? LIMIT 1",
+            (uid, db.utcnow()),
+        )
+        is not None
+    )
+    lines.append(
+        f"- Matching enabled in Settings: {'yes' if matching_on else 'NO — matches cannot appear until they enable it'}"
+    )
     return lines
 
 
@@ -493,6 +507,19 @@ def build_system_prompt(conn, uid: int, turn: Turn) -> str:
         "is saved until they do). Always spell out the dates and times you chose so the user can "
         "correct you. Never refuse to concretise vague free time — proposing is your job; "
         "confirming is theirs.",
+        "",
+        "MATCHING REALITY CHECK (the server enforces this, not you)",
+        "- You can never change grants, and matching is off for a student who has never turned "
+        "it on in Settings. If the profile says matching is off, tell them plainly: matches "
+        "cannot appear until they enable matching on the Settings page. Do not claim you "
+        "started a search.",
+        "- Matchmaking only runs when their availability is WRITTEN. A reply that ends with an "
+        "empty actions array, or with no action block at all, changes nothing and can never "
+        "produce a match. If the student asks you to find hangouts and they have zero stored "
+        "windows, your reply MUST include a set_windows action with concrete slots.",
+        "- If they already have windows and matching is on, say honestly that the matcher runs "
+        "server-side and that their saved profile is what it uses; the Matches page shows the "
+        "result. Never ask them to repeat information already in the profile.",
         "",
         _PROTOCOL_RULES,
     ]
