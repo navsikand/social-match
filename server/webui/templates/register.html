@@ -30,9 +30,11 @@
         {% for i in range(1, 9) %}<option value="{{ i }}">Avatar {{ i }}</option>{% endfor %}
       </select>
     </label>
+    {% if invite_required %}
     <label>Registration code
       <input type="text" name="registration_code" id="registration_code" autocomplete="off" required>
     </label>
+    {% endif %}
     <label class="check">
       <input type="checkbox" name="adult_attested" id="adult_attested">
       I am 18 or older. This is a self-attestation, not age verification.
@@ -63,7 +65,7 @@
       display_name: document.getElementById("display_name").value,
       password: document.getElementById("password").value,
       avatar_id: parseInt(document.getElementById("avatar_id").value, 10),
-      registration_code: document.getElementById("registration_code").value,
+      registration_code: (document.getElementById("registration_code") || {}).value || "",
       adult_attested: document.getElementById("adult_attested").checked,
     };
     try {

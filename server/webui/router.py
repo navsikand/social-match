@@ -193,7 +193,8 @@ def _doc_page(request: Request, title: str, path: str, missing: str, template: s
 
 @router.post("/api/register", status_code=201)
 def register(body: RegisterBody, response: Response, conn=Depends(db.get_conn)):
-    if body.registration_code.strip() != config.registration_code():
+    required = config.registration_code()
+    if required and body.registration_code.strip() != required:
         raise db.http_error(403, "invite_required", "a valid registration code is required")
     if not body.adult_attested:
         raise db.http_error(403, "attest_required", "you must confirm you are 18 or older")
@@ -335,7 +336,9 @@ def save_timezone(body: TzBody, user=Depends(sessions.require_session), conn=Dep
 
 @router.get("/register", response_class=HTMLResponse)
 def register_page(request: Request):
-    return templates.TemplateResponse(request, "register.html", {})
+    return templates.TemplateResponse(
+        request, "register.html", {"invite_required": bool(config.registration_code())}
+    )
 
 
 @router.get("/login", response_class=HTMLResponse)

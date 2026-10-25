@@ -45,7 +45,7 @@ uv run pytest -q                                 # 544 tests, ~10 s
 uv run python demo/scenario.py                   # 17 asserted beats over the real HTTP API
 ```
 
-Open <http://localhost:8000/register>, use the invite code (`REGISTRATION_CODE`, default `socialmatch2026`), tick the
+Open <http://localhost:8000/register> (signup is open; set `REGISTRATION_CODE` if you want an invite gate), tick the
 18+ attestation, and upload a photo — **a photo is required before anyone is matchable**, by design.
 
 The demo prints an honest "what crossed the wire" summary and exits non-zero on any failed beat. To film against a
@@ -169,7 +169,7 @@ These are limits, stated plainly. `CONTRACT.md` §16 (the honesty ledger) is bin
    The demo posts `agent_computed` payloads against fixed windows. `student_confirmed_at` is **provenance, not
    proof**: it records that a client asserted "the student approved this" (or that you clicked Confirm), and the
    server cannot verify a human read anything.
-2. **The invite gate is not identity verification**, and 18+ is self-attestation — the register form records
+2. **Signup is open by default, and the invite gate is not identity verification when enabled.** 18+ is self-attestation — the register form records
    `adult_attested_at` because a box was ticked. No ID check, no school affiliation, anywhere.
 3. **The assistant is a model.** It can be wrong, including about your own state — which is why the chips and the
    Settings page are the truth and every write is revalidated server-side. The negotiation worker is bounded (one op
@@ -186,7 +186,7 @@ These are limits, stated plainly. `CONTRACT.md` §16 (the honesty ledger) is bin
    consent, blocks, or the time overlap.
 7. **The model provider is a processor we do not control.** A chat turn sends your own state, the last 40 transcript
    messages and your text to whatever `AI_API_URL` names. It may log, retain or train on that. Don't type secrets.
-8. **The demo runset is small and invite-only**, run on team devices with fictional students and synthetic calendars.
+8. **The demo runset is small**, run on team devices with fictional students and synthetic calendars.
    It shows the loop closing; it is not a population study or a safety record.
 9. **Typed hard constraints are not built.** Budget and distance exist as an *agent's private rule* in the
    negotiation story, not as a server-enforced filter. ML ranks; it never overrides.

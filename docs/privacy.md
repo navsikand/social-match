@@ -194,5 +194,5 @@ YOUR RIGHTS, AS BUTTONS
 - Block and report: one report hides the pair immediately, both directions. A block does the same and additionally
   prevents any future card between the two of you, both directions.
 
-To ask a question about any of this, ask whoever handed you the invite code — there is no support desk. To raise
+To ask a question about any of this, ask whoever showed you the app — there is no support desk. To raise
 something about a card or a photo, report the pair: that is the path that reaches the named team member who responds.

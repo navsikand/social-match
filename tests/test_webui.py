@@ -58,11 +58,26 @@ def test_register_sets_session_cookie(client):
     assert client.cookies.get("smsession")
 
 
-def test_register_wrong_invite_code(client):
+def test_register_wrong_invite_code_when_a_code_is_configured(client):
+    """The invite gate is opt-in: configured code -> wrong code is refused."""
     r = client.post("/api/register", json=_payload(registration_code="nope"))
     assert r.status_code == 403
     assert _error(r) == "invite_required"
     assert "smsession=" not in r.headers.get("set-cookie", "")
+
+
+def test_signup_is_open_when_no_code_is_configured(client, monkeypatch):
+    """No REGISTRATION_CODE -> anyone can register, and the form asks for no code."""
+    monkeypatch.delenv("REGISTRATION_CODE", raising=False)
+    page = client.get("/register")
+    assert page.status_code == 200
+    assert 'id="registration_code"' not in page.text, "the field must not render when there is no gate"
+
+    body = _payload()
+    body.pop("registration_code", None)
+    r = client.post("/api/register", json=body)
+    assert r.status_code == 201, r.text
+    assert client.cookies.get("smsession")
 
 
 def test_register_requires_adult_attestation(client):

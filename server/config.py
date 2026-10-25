@@ -105,7 +105,13 @@ def block_salt() -> str:
 
 
 def registration_code() -> str:
-    return os.environ.get("REGISTRATION_CODE", "socialmatch2026")
+    """Invite code, or "" for open signup.
+
+    Signup is OPEN unless a deployment sets REGISTRATION_CODE. The value is a gate, never
+    identity verification (see README caveats), and the register form only renders the field
+    when one is configured.
+    """
+    return (os.environ.get("REGISTRATION_CODE") or "").strip()
 
 
 def rotate_grace_seconds() -> int:

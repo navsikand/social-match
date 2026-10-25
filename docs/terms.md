@@ -12,8 +12,8 @@ card says.
 
 WHO CAN USE IT
 
-Only people who were given the invite code (the `REGISTRATION_CODE` gate). The gate exists to keep the demo runset
-small; it is not identity verification. You must be 18 or older, and you confirm that by ticking a box when you
+Signup is open by default. A deployment may switch on the invite gate (`REGISTRATION_CODE`), which keeps the demo
+runset small; either way the gate is not identity verification. You must be 18 or older, and you confirm that by ticking a box when you
 register. That is self-attestation — the server records the timestamp of your attestation, and nothing checks it. There
 is no age verification and no verification that you attend any particular school. If you are not 18, do not use it.
 
@@ -87,8 +87,8 @@ served, and it is the path by which the image gets looked at and, if it should n
 
 MISUSE
 
-If the invite code gets out, or the demo is used to harass someone, we rotate the invite code and the demo stops
-accepting new accounts. We may also delete accounts and data without notice, because this is a demo and there is no
+If the invite code gets out, or the demo is used to harass someone, we rotate the code (or switch the gate on) and
+the demo stops accepting new accounts. We may also delete accounts and data without notice, because this is a demo and there is no
 service commitment. Do not use this to send anything to another student that you would not say to their face, and do
 not publish a photo you would not show them in person.
 
