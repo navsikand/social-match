@@ -98,30 +98,52 @@ def weight(users_with_tag: int, live_users: int) -> float:
     return max(WEIGHT_MIN, min(WEIGHT_MAX, raw))
 
 
-def best_match(tag: str, others: set[str] | frozenset[str]) -> float:
-    return max((sim(tag, other) for other in others), default=0.0)
+def best_match(tag: str, others: set[str] | frozenset[str], sim_fn=None) -> float:
+    f = sim_fn or sim
+    return max((f(tag, other) for other in others), default=0.0)
 
 
-def tag_points(mine: set[str], theirs: set[str], weights: dict[str, float] | None = None) -> float:
-    """The interest component of the score (see module docstring). Symmetric in its arguments."""
+def tag_points(mine: set[str], theirs: set[str], weights: dict[str, float] | None = None,
+               sim_fn=None) -> float:
+    """The interest component of the score (see module docstring). Symmetric in its arguments.
+
+    `sim_fn(a, b) -> 0..1` defaults to the hand-made taxonomy; the matcher passes the learned
+    encoder's similarity when one is ready (server/encoder.py).
+    """
     if not mine or not theirs:
         return 0.0
     w = weights or {}
-    forward = sum(best_match(t, theirs) * w.get(t, 1.0) for t in mine)
-    backward = sum(best_match(t, mine) * w.get(t, 1.0) for t in theirs)
+    forward = sum(best_match(t, theirs, sim_fn) * w.get(t, 1.0) for t in mine)
+    backward = sum(best_match(t, mine, sim_fn) * w.get(t, 1.0) for t in theirs)
     return min(TAG_POINTS_CAP, POINTS_PER_EXACT * (forward + backward) / 2.0)
 
 
-def max_similarity(mine: set[str], theirs: set[str]) -> float:
-    return max((sim(a, b) for a in mine for b in theirs), default=0.0)
+def max_similarity(mine: set[str], theirs: set[str], sim_fn=None) -> float:
+    f = sim_fn or sim
+    return max((f(a, b) for a in mine for b in theirs), default=0.0)
 
 
-def related_pairs(mine: set[str], theirs: set[str], limit: int = 3) -> list[dict]:
+def related_pairs(mine: set[str], theirs: set[str], limit: int = 3, sim_fn=None,
+                  related_at: float = SIM_DOMAIN) -> list[dict]:
     """Same-domain pairs that are NOT the same tag, e.g. climbing ~ hiking, for the card to explain.
 
     Perspective-neutral on purpose (the stored reason is shown to both students): the pair's tags
     are sorted, so it reads the same from either side. Both tags are already visible on the card.
     """
+    if sim_fn is not None:
+        # Learned similarity: no domain label exists, so the card shows the score instead.
+        scored: dict[tuple[str, str], float] = {}
+        for a in sorted(mine):
+            for b in sorted(theirs):
+                if a == b:
+                    continue
+                s = sim_fn(a, b)
+                if s >= related_at:
+                    key = tuple(sorted((a, b)))
+                    scored[key] = max(scored.get(key, 0.0), s)
+        ranked = sorted(scored.items(), key=lambda kv: (-kv[1], kv[0]))
+        return [{"tags": list(k), "domain": shared_domain(*k), "score": round(s, 2)}
+                for k, s in ranked[:limit]]
     seen: dict[tuple[str, str], str] = {}
     for a in sorted(mine):
         for b in sorted(theirs):

@@ -170,6 +170,8 @@ There is one rule per kind of data, and the server enforces each one:
 This is a self-hosted demo: one FastAPI process and one SQLite file, no analytics vendor, no email vendor, no cloud
 queue. The one outside party is the model provider described above, and only chat turns reach it.
 
+Matching your interests to other people's uses a small language-understanding model that runs on this same server. Your interest words are turned into numbers inside this process to judge how alike two interests are; they are not sent to any other party, and the numbers are not stored or shown. The model files themselves are downloaded once from the public model host when the server first starts.
+
 YOUR RIGHTS, AS BUTTONS
 
 - Every grant has a toggle in settings — matching, the two publication tiers, reveal, and delegation. Turning one off

@@ -18,7 +18,7 @@ import collections
 import datetime
 import json
 
-from server import config, db, taxonomy, wording
+from server import config, db, encoder, taxonomy, wording
 from server import logging as smlog
 
 log = smlog.get("match")
@@ -219,6 +219,10 @@ def generate_for_user(conn, user_id: int) -> list[int]:
     my_events = _events(conn, user_id, now)
     weights = _tag_weights(conn, now)
     floor = config.similarity_floor()
+    # ONE scorer for the whole pass: the learned encoder when it is ready (and passed its quality
+    # gate), else the hand-made taxonomy. Bound to a snapshot, so a pass is never half-and-half.
+    learned = encoder.similarity_fn()
+    sim_fn, sim_model = (learned if learned is not None else (None, None))
 
     others = conn.execute(
         "SELECT user_id, expires_at FROM availability WHERE user_id != ? AND expires_at > ?"
@@ -282,17 +286,17 @@ def generate_for_user(conn, user_id: int) -> list[int]:
         their_tags = _tags(conn, other_id)
         their_wants = _wants(conn, other_id)
         shared = sorted(my_tags & their_tags)
-        if floor > 0 and taxonomy.max_similarity(my_tags, their_tags) < floor:
+        if floor > 0 and taxonomy.max_similarity(my_tags, their_tags, sim_fn) < floor:
             skip("below_similarity_floor", other_id)  # SIMILARITY_FLOOR: time alone is not enough
             continue
-        related = taxonomy.related_pairs(my_tags, their_tags)
+        related = taxonomy.related_pairs(my_tags, their_tags, sim_fn=sim_fn)
         overlap_hours = int(round(seg_seconds / 3600))
         both_want_event = "event" in my_wants and "event" in their_wants
         # A link both students sent is the same public event: the strongest single signal.
         # Only the intersection is ever shown; either side's other events stay private.
         their_events = _events(conn, other_id, now)
         shared_events = _shared_events(my_events, their_events)
-        interest_points = int(taxonomy.tag_points(my_tags, their_tags, weights) + 0.5)
+        interest_points = int(taxonomy.tag_points(my_tags, their_tags, weights, sim_fn) + 0.5)
         score = (
             interest_points
             + 2 * overlap_hours
@@ -308,6 +312,8 @@ def generate_for_user(conn, user_id: int) -> list[int]:
         }
         if related:
             reasons["related"] = related
+        if sim_model is not None:
+            reasons["similarity_model"] = sim_model  # recorded, never re-derived under another model
         if shared_events:
             reasons["shared_events"] = shared_events
         conn.execute(

@@ -12,6 +12,11 @@ dependencies = [
   "pillow>=13.0.0",
 ]
 
+[project.optional-dependencies]
+# The learned interest encoder (server/encoder.py). Heavy (torch); without it the server falls back
+# to the hand-made taxonomy. Install with: uv sync --extra encoder
+encoder = ["sentence-transformers>=3.0"]
+
 [dependency-groups]
 dev = ["pytest>=8.0"]
 

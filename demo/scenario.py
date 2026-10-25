@@ -1282,6 +1282,7 @@ def prepare_env() -> tuple[str, str]:
     os.environ.setdefault("BLOCK_SALT", "demo-block-salt-not-for-production")
     os.environ.setdefault("REGISTRATION_CODE", "cubbie2026")
     os.environ.setdefault("BASE_URL", "http://localhost:8000")
+    os.environ.setdefault("ENCODER_ENABLED", "0")  # offline and reproducible; the live server uses the encoder
     # Keep the output clean: importing TestClient emits a Starlette/httpx UserWarning.
     warnings.filterwarnings("ignore", message=r".*starlette\.testclient.*deprecated.*")
     return db_path, tmpdir

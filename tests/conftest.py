@@ -10,6 +10,8 @@ def db_env(tmp_path, monkeypatch):
     monkeypatch.setenv("SESSION_SECRET", "test-secret")
     monkeypatch.setenv("BLOCK_SALT", "test-salt")
     monkeypatch.setenv("REGISTRATION_CODE", "testiva")
+    # Tests never download a model: the app starts with the encoder off unless a test loads a fake.
+    monkeypatch.setenv("ENCODER_ENABLED", "0")
     return path
 
 
