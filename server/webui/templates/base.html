@@ -6,9 +6,9 @@
   <title>{% block title %}Social Match{% endblock %}</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}">
   <header class="topbar">
-    <a class="brand" href="/">Cubbie Match</a>
+    <a class="brand" href="/">{% include "_logo.html" %}<span>Social Match</span></a>
     <nav>
       {% if signed_in %}
         <a href="/">Dashboard</a>
