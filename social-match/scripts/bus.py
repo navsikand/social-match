@@ -4,7 +4,7 @@
 Python standard library only: urllib.request, json, argparse, os, sys.
 
     python3 scripts/bus.py --poll [--since N]   # print new inbox messages, then "NEXT SINCE <seq>"
-    python3 scripts/bus.py --send-state FILE    # POST /api/state, print the server's JSON reply
+    python3 scripts/bus.py --send-state FILE    # POST /api/state (windows, tags, public events, busy_load), print the reply
     python3 scripts/bus.py --activity ID        # show the current activity offer on a match
     python3 scripts/bus.py --propose-activity ID --version N --tag TAG --url HTTPS_LINK
     python3 scripts/bus.py --respond-activity ID --offer N --accept
@@ -45,7 +45,14 @@ TAG_VOCAB = [
     "cooking", "language_exchange", "debate", "anime", "cinema", "volunteering",
 ]
 WANTS_VOCAB = ["hangout", "event"]
-PAYLOAD_KEYS = {"windows", "tags", "wants", "free_time", "consent"}
+REQUIRED_KEYS = {"windows", "tags", "wants", "free_time", "consent"}
+# Pairing signals are optional: public events from the inbox/calendar, the student's approval of that
+# list, and one coarse 0-3 number for how heavy the next two weeks are. Nothing else is allowed.
+OPTIONAL_KEYS = {"events", "events_confirmed_at", "busy_load"}
+PAYLOAD_KEYS = REQUIRED_KEYS | OPTIONAL_KEYS
+EVENT_KEYS = {"url", "start", "end", "tz", "category"}
+EVENT_CATEGORIES = ["career", "club", "talk", "music", "sports", "arts", "food", "party", "volunteer", "other"]
+MAX_EVENTS = 10
 WINDOW_KEYS = {"start", "end", "tz"}
 FREE_TIME_KEYS = {"source", "student_confirmed_at"}
 CONSENT_KEYS = {"matching", "publication"}
@@ -185,7 +192,7 @@ def payload_problems(payload):
     extra = sorted(set(payload) - PAYLOAD_KEYS)
     if extra:
         problems.append(f"unknown top-level key(s): {', '.join(extra)}; only {sorted(PAYLOAD_KEYS)} are allowed")
-    missing = sorted(PAYLOAD_KEYS - set(payload))
+    missing = sorted(REQUIRED_KEYS - set(payload))
     if missing:
         problems.append(f"missing key(s): {', '.join(missing)}")
 
@@ -244,6 +251,8 @@ def payload_problems(payload):
         if source == "cubbie_computed" and not free_time.get("student_confirmed_at"):
             problems.append("free_time.source 'cubbie_computed' needs student_confirmed_at (when the student said yes)")
 
+    problems.extend(event_problems(payload))
+
     consent = payload.get("consent")
     if not isinstance(consent, dict):
         problems.append("consent must be an object")
@@ -262,6 +271,43 @@ def payload_problems(payload):
                 problems.append(f"consent.publication has unknown key(s): {', '.join(stray)}")
             if publication.get("tier") not in ("card", "card+name"):
                 problems.append("consent.publication.tier must be 'card' or 'card+name'")
+    return problems
+
+
+def event_problems(payload):
+    """Pre-flight for the pairing signals. Stricter than the server on one point, on purpose: an event link
+    must not carry a ?query. Invitation emails put personal RSVP tokens there; the server would drop it, but it
+    should never leave the phone at all."""
+    problems = []
+    events = payload.get("events", [])
+    if not isinstance(events, list):
+        return ["events must be a list"]
+    if len(events) > MAX_EVENTS:
+        problems.append(f"events has {len(events)} entries; at most {MAX_EVENTS} are allowed")
+    if events and not payload.get("events_confirmed_at"):
+        problems.append("events needs events_confirmed_at (the moment the student approved the event list)")
+    for index, event in enumerate(events):
+        if not isinstance(event, dict):
+            problems.append(f"events[{index}] must be an object")
+            continue
+        stray = sorted(set(event) - EVENT_KEYS)
+        if stray:
+            problems.append(f"events[{index}] has unknown key(s): {', '.join(stray)}; only {sorted(EVENT_KEYS)} are allowed")
+        for key in sorted(EVENT_KEYS - set(event)):
+            problems.append(f"events[{index}] is missing {key}")
+        if event.get("category") not in EVENT_CATEGORIES:
+            problems.append(f"events[{index}].category must be one of {', '.join(EVENT_CATEGORIES)}")
+        url = event.get("url")
+        for problem in url_problems(url):
+            problems.append(f"events[{index}].url: {problem}")
+        if isinstance(url, str) and "?" in url:
+            problems.append(f"events[{index}].url has a ?query part; send the public event page without it")
+        start, end = event.get("start"), event.get("end")
+        if isinstance(start, str) and isinstance(end, str) and not start < end:
+            problems.append(f"events[{index}] start must be before end (local 'YYYY-MM-DDTHH:MM' strings)")
+    load = payload.get("busy_load")
+    if "busy_load" in payload and (isinstance(load, bool) or not isinstance(load, int) or not 0 <= load <= 3):
+        problems.append("busy_load must be a whole number from 0 (light) to 3 (heavy)")
     return problems
 
 
@@ -573,6 +619,50 @@ def selftest(args):
     many = good_payload()
     many["windows"] = [{"start": "2026-10-29T19:00", "end": "2026-10-29T20:00", "tz": "UTC"}] * 21
     check(any("at most 20" in problem for problem in payload_problems(many)), "21 windows are caught", failures)
+
+    # Pairing signals: public events + busy_load.
+    ev = {"url": "https://careers.asu.example.edu/fall-fair", "start": "2026-10-30T10:00",
+          "end": "2026-10-30T14:00", "tz": "America/Phoenix", "category": "career"}
+    with_ev = good_payload()
+    with_ev.update({"events": [dict(ev)], "events_confirmed_at": "2026-10-24T09:10:00Z", "busy_load": 2})
+    check(payload_problems(with_ev) == [], f"a payload with events and busy_load validates ({payload_problems(with_ev)})", failures)
+
+    no_ack = dict(with_ev)
+    del no_ack["events_confirmed_at"]
+    check(any("events_confirmed_at" in problem for problem in payload_problems(no_ack)),
+          "events without the student's approval stamp are caught", failures)
+
+    titled = good_payload()
+    titled.update({"events": [dict(ev, title="Interview with Acme")], "events_confirmed_at": "2026-10-24T09:10:00Z"})
+    check(any("title" in problem for problem in payload_problems(titled)),
+          "an event title is caught before sending", failures)
+
+    tokened = good_payload()
+    tokened.update({"events": [dict(ev, url=ev["url"] + "?rsvp_token=abc123")], "events_confirmed_at": "2026-10-24T09:10:00Z"})
+    check(any("?query" in problem for problem in payload_problems(tokened)),
+          "a personal RSVP link with a query string is caught before sending", failures)
+
+    for bad_url in ("http://x.example.com/e", "https://u:p@x.example.com/e", "https://x.example.com/e#rsvp"):
+        bad = good_payload()
+        bad.update({"events": [dict(ev, url=bad_url)], "events_confirmed_at": "2026-10-24T09:10:00Z"})
+        check(payload_problems(bad) != [], f"event link {bad_url!r} is caught", failures)
+
+    bad_cat = good_payload()
+    bad_cat.update({"events": [dict(ev, category="interview")], "events_confirmed_at": "2026-10-24T09:10:00Z"})
+    check(any("category" in problem for problem in payload_problems(bad_cat)),
+          "an event category outside the list is caught", failures)
+
+    too_many = good_payload()
+    too_many.update({"events": [dict(ev)] * (MAX_EVENTS + 1), "events_confirmed_at": "2026-10-24T09:10:00Z"})
+    check(any("at most 10" in problem for problem in payload_problems(too_many)), "11 events are caught", failures)
+
+    for bad_load in (4, -1, 1.5, "2", True):
+        bad = good_payload()
+        bad["busy_load"] = bad_load
+        check(any("busy_load" in problem for problem in payload_problems(bad)), f"busy_load {bad_load!r} is caught", failures)
+    zero = good_payload()
+    zero["busy_load"] = 0
+    check(payload_problems(zero) == [], "busy_load 0 (a light fortnight) is valid", failures)
 
     items = [
         {"seq": 4, "kind": "candidate", "payload": {"message": "Ava is up for Thu 19:00-21:00.", "card_url": "http://x/m/1"}},

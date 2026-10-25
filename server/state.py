@@ -230,6 +230,29 @@ async def post_state(
             # The refusal branch deliberately does NOT touch them: a refusal stops
             # matching, it doesn't erase preferences (they're inert without a live
             # matching grant).
+            # Pairing signals: replace-style, like tags. Absent == cleared (the payload is
+            # the current truth), so a student who drops an event stops being matched on it.
+            conn.execute("DELETE FROM user_events WHERE user_id=?", (user_id,))
+            for ev in payload.events:
+                conn.execute(
+                    "INSERT OR REPLACE INTO user_events"
+                    " (user_id, url, category, starts_at, ends_at, tz) VALUES (?,?,?,?,?,?)",
+                    (
+                        user_id,
+                        ev.url,
+                        ev.category,
+                        _to_utc(ev.start, ev.tz),
+                        _to_utc(ev.end, ev.tz),
+                        ev.tz,
+                    ),
+                )
+            conn.execute("DELETE FROM user_load WHERE user_id=?", (user_id,))
+            if payload.busy_load is not None:
+                conn.execute(
+                    "INSERT INTO user_load (user_id, busy_load) VALUES (?,?)",
+                    (user_id, payload.busy_load),
+                )
+
             conn.execute("DELETE FROM user_wants WHERE user_id=?", (user_id,))
             for want in payload.wants:
                 conn.execute(
@@ -272,6 +295,7 @@ async def post_state(
             # end state after one POST is already up to date.
             _void_uncovered_plans(conn, user_id, now)
             matching.generate_for_user(conn, user_id)
+            matching.refresh_events(conn, user_id)
 
     return JSONResponse(
         status_code=201,
@@ -285,5 +309,8 @@ async def post_state(
                 "mapped": mapped if payload.consent.matching else [],
                 "kept_unscored": unscored if payload.consent.matching else [],
             },
+            # The links the server actually stored, so Cubbie can show the student exactly
+            # what is now visible to a match who has the same event.
+            "events": {"stored": [ev.url for ev in payload.events] if payload.consent.matching else []},
         },
     )

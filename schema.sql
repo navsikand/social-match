@@ -188,3 +188,26 @@ CREATE TABLE IF NOT EXISTS activity_offers (
   FOREIGN KEY (proposal_id) REFERENCES proposals(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS ix_offers_proposal ON activity_offers(proposal_id, round);
+
+-- Pairing signals (Track 2). Tied to the availability row, so every existing cleanup path
+-- (expiry sweep, leave matching, delete account, pairing revoke) removes them with it.
+-- user_events holds PUBLIC events only: canonical link (no query), time, closed category.
+CREATE TABLE IF NOT EXISTS user_events (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  url TEXT NOT NULL,
+  category TEXT NOT NULL CHECK (category IN
+    ('career','club','talk','music','sports','arts','food','party','volunteer','other')),
+  starts_at TEXT NOT NULL,
+  ends_at TEXT NOT NULL,
+  tz TEXT NOT NULL,
+  UNIQUE (user_id, url),
+  FOREIGN KEY (user_id) REFERENCES availability(user_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_user_events_url ON user_events(url);
+
+CREATE TABLE IF NOT EXISTS user_load (
+  user_id INTEGER PRIMARY KEY,
+  busy_load INTEGER NOT NULL CHECK (busy_load BETWEEN 0 AND 3),
+  FOREIGN KEY (user_id) REFERENCES availability(user_id) ON DELETE CASCADE
+);
