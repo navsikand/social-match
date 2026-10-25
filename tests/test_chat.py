@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient  # pyright: ignore[reportMissingImports]
 
-from server import activity, chat, config, db
+from server import activity, ai, chat, config, db
 from server.scheduling import SchedulingError
 from server.schema import MAX_WINDOWS
 from tests import util
@@ -41,6 +41,7 @@ def scripted(text: str):
     async def fake(system, messages, *, transport=None):
         for piece in pieces:
             yield piece
+        yield ai.finished()  # F5: only a [DONE]-terminated reply may apply anything
 
     return fake
 
@@ -955,6 +956,72 @@ def test_reserve_turn_refuses_for_a_deleted_account(client):
         assert chat.persist_final_assistant(conn, uid, "text") is None
     finally:
         conn.close()
+
+
+# ------------------------------------------------------------------ section: completion status
+# Gate review P1 #5: a truncated (capped) or unterminated reply is text, never an instruction.
+
+
+def cut_short(text: str, status: str):
+    """A provider stand-in that yields a complete-looking reply and then says how it ended."""
+
+    async def fake(system, messages, *, transport=None):
+        yield text
+        yield ai.finished(status)
+
+    return fake
+
+
+COMPLETE_LOOKING = 'Sure.\n```json\n{"actions": [{"op": "set_interests", "tags": ["matcha"]}]}\n```\n'
+
+
+@pytest.mark.parametrize("status", [ai.CAPPED, ai.EOF])
+def test_cut_off_reply_applies_nothing(client, monkeypatch, status):
+    uid = _register(client)
+    monkeypatch.setattr(chat.ai, "stream_reply", cut_short(COMPLETE_LOOKING, status))
+
+    r = client.post("/api/chat", json={"content": "matcha please"})
+
+    kinds = [e["type"] for e in events_of(r)]
+    assert "actions" not in kinds, "a cut-off reply must not execute its fence"
+    assert "state" not in kinds
+    assert last_event(r, "note")["text"] == chat.CUT_OFF_NOTE
+    assert events_of(r)[-1]["type"] == "done"
+    conn = db.connect()
+    try:
+        # the text is still honest record-keeping; only the instruction is dropped
+        roles = [x["role"] for x in db.q(conn, "SELECT role FROM chat_messages WHERE user_id=?", (uid,))]
+        assert roles == ["user", "assistant", "note"]
+        assert db.one(conn, "SELECT COUNT(*) AS n FROM hobby_tags WHERE user_id=?", (uid,))["n"] == 0
+    finally:
+        conn.close()
+
+
+def test_missing_completion_marker_is_not_executable(client, monkeypatch):
+    """A stream that ends without any status marker (an old-style scripted reply) is EOF."""
+
+    uid = _register(client)
+
+    async def markerless(system, messages, *, transport=None):
+        yield COMPLETE_LOOKING
+        # no ai.finished(): the stream simply stops
+
+    monkeypatch.setattr(chat.ai, "stream_reply", markerless)
+
+    r = client.post("/api/chat", json={"content": "matcha please"})
+
+    assert "actions" not in [e["type"] for e in events_of(r)]
+    assert last_event(r, "note")["text"] == chat.CUT_OFF_NOTE
+
+
+def test_done_marker_executes(client, monkeypatch):
+    """Control: the same reply WITH the [DONE] marker does apply."""
+    uid = _register(client)
+    monkeypatch.setattr(chat.ai, "stream_reply", cut_short(COMPLETE_LOOKING, ai.DONE))
+
+    r = client.post("/api/chat", json={"content": "matcha please"})
+
+    assert last_event(r, "actions")["applied"][0]["op"] == "set_interests"
 
 
 # ------------------------------------------------------------------ section: lifecycle

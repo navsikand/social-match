@@ -46,6 +46,7 @@ def scripted(text: str):
     async def fake(system, messages, *, transport=None):
         for start in range(0, len(text), 40):
             yield text[start : start + 40]
+        yield ai.finished()  # F5: only a [DONE]-terminated reply may apply anything
 
     return fake
 
@@ -78,6 +79,7 @@ def withdraw_delegation_mid_stream(text: str, uid: int):
         finally:
             conn.close()
         yield text
+        yield ai.finished()
 
     return fake
 

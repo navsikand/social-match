@@ -63,6 +63,8 @@ MAX_BODY_BYTES = 64 * 1024
 MAX_CONTENT_CHARS = 4000
 MAX_HISTORY = 200
 PROVIDER_HISTORY = 40
+#: Pinned text for a reply that never finished cleanly (F5). Tests match on it exactly.
+CUT_OFF_NOTE = "that reply was cut off — nothing was applied"
 
 _UTC_FMT = "%Y-%m-%dT%H:%M:%SZ"
 _LOCAL_FMT = "%Y-%m-%dT%H:%M:%S"
@@ -670,7 +672,7 @@ def _merge_ops(
 
 
 def _store_pending(
-    conn, uid: int, kind: str, ops: list[dict], items: dict, state_hash: str
+    conn, uid: int, kind: str, ops: list[dict], items: dict | list[dict], state_hash: str
 ) -> int | None:
     """One preview row. Returns None when the account is gone (nothing is stored)."""
     now = db.utcnow()
@@ -701,12 +703,13 @@ def _latest_pending(conn, uid: int):
 def _structured_note(who: str, decided: str, tag=None, url=None, reason=None) -> str:
     """A fixed template rendered from {decided, tag, url, reason} only — no provider prose."""
     if decided == "offer":
-        return f"{who} proposed {offers.human_tag(tag)}: {url}"
+        return f"{who} proposed {offers.human_tag(str(tag))}: {url}"
     if decided == "accept":
         return f"{who} accepted the activity"
     if decided == "counter":
-        return f"{who} proposed {offers.human_tag(tag)} instead: {url}"
-    return f"{who} passed: {offers.REASON_WORDS.get(reason, reason)}"
+        return f"{who} proposed {offers.human_tag(str(tag))} instead: {url}"
+    word = offers.REASON_WORDS.get(reason, reason) if isinstance(reason, str) else "no reason given"
+    return f"{who} passed: {word}"
 
 
 class _Drop(Exception):
@@ -826,8 +829,16 @@ async def run_turn(conn, uid: int, turn: Turn) -> AsyncIterator[dict]:
 
     chunks: list[str] = []
     provider_error: ai.AIError | None = None
+    status = ai.EOF
+    stream = ai.stream_reply(system, messages)
     try:
-        async for piece in ai.stream_reply(system, messages):
+        # F5: read the completion STATUS (`ai.Completion`, the stream's last item) rather than
+        # assuming a finished stream executed cleanly. Actions below run only on ai.DONE; a
+        # capped or unterminated reply is text, never an instruction.
+        async for piece in stream:
+            if isinstance(piece, ai.Completion):
+                status = piece.status if piece.status in (ai.DONE, ai.CAPPED) else ai.EOF
+                continue
             chunks.append(piece)
             yield {"type": "token", "text": piece}
     except ai.AIError as exc:
@@ -839,6 +850,9 @@ async def run_turn(conn, uid: int, turn: Turn) -> AsyncIterator[dict]:
         yield {"type": "error", "code": "internal", "detail": detail}
         yield {"type": "done"}
         return
+    finally:
+        with contextlib.suppress(Exception):
+            await stream.aclose()
 
     text = "".join(chunks)
     if provider_error is not None:
@@ -852,6 +866,16 @@ async def run_turn(conn, uid: int, turn: Turn) -> AsyncIterator[dict]:
     if persist_final_assistant(conn, uid, text) is None:
         # The account was deleted while the provider was thinking: a dropped turn. The text
         # was not stored, and no action may run (there is nobody to apply it for).
+        yield {"type": "done"}
+        return
+
+    if status != ai.DONE:
+        # The reply was cut off (cap) or never terminated ([DONE] missing). Its text is honest
+        # record-keeping; its fence is not an instruction.
+        note = CUT_OFF_NOTE
+        with contextlib.suppress(Exception):
+            persist_note(conn, uid, note)
+        yield {"type": "note", "text": note}
         yield {"type": "done"}
         return
 

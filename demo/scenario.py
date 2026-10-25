@@ -1043,6 +1043,135 @@ def beat_14_shared_event(d: Demo) -> None:
     d.counters["events"] += 3
 
 
+
+# ------------------------------------------------------- chat-era beats (integrator)
+
+ICS_TPL = (
+    "BEGIN:VCALENDAR\r\n"
+    "VERSION:2.0\r\n"
+    "PRODID:-//Social Match demo//EN\r\n"
+    "BEGIN:VEVENT\r\n"
+    "SUMMARY:Dentist\r\n"
+    "DTSTART:{start_utc}\r\n"
+    "DTEND:{end_utc}\r\n"
+    "END:VEVENT\r\n"
+    "BEGIN:VEVENT\r\n"
+    "SUMMARY:Career fair\r\n"
+    "LOCATION:Rec Hall\r\n"
+    "DTSTART;VALUE=DATE:{d2}\r\n"
+    "DTEND;VALUE=DATE:{d3}\r\n"
+    "END:VEVENT\r\n"
+    "END:VCALENDAR\r\n"
+)
+
+
+def _ics_utc_times() -> tuple[str, str]:
+    """Monday 09:00-10:30 local (TZ) as ICS basic-format UTC strings."""
+    day = next_weekday(0)
+    start = datetime.datetime(day.year, day.month, day.day, 9, 0, 0, tzinfo=ZoneInfo(TZ))
+    end = start + datetime.timedelta(hours=1, minutes=30)
+    return (
+        start.astimezone(datetime.UTC).strftime("%Y%m%dT%H%M%SZ"),
+        end.astimezone(datetime.UTC).strftime("%Y%m%dT%H%M%SZ"),
+    )
+
+
+def beat_15_manual_schedule(d: Demo) -> None:
+    """The demo affordance: windows typed by hand, no calendar + no agent anywhere."""
+    d.register("mia", "Mia", 7)
+    c = d.client("mia")
+    thu = window(3, 19, 21)  # Thursday 19:00-21:00 local
+    r = c.post(
+        "/api/schedule/windows",
+        json={"tz": TZ, "windows": [{"start": thu[0], "end": thu[1]}]},
+    )
+    check(
+        r.status_code == 200 and r.json().get("ok") is True,
+        f"manual windows should save: {r.status_code} {r.text[:200]}",
+    )
+    h = c.get("/api/chat/history").json()
+    check(h["state"]["windows"] == 1, f"state chips should count 1 window: {excerpt(h['state'])}")
+    d.say("  Mia typed one window in /schedule → saved through the same write path as any agent")
+    d.counters["windows"] += 1
+
+
+def beat_16_ics_upload(d: Demo) -> None:
+    """The calendar file path: parse in memory, keep ONLY intervals, preview then Confirm."""
+    c = d.client("mia")
+    d2 = next_weekday(1).strftime("%Y%m%d")   # Tuesday (ICS basic date format)
+    d3 = next_weekday(2).strftime("%Y%m%d")   # Wednesday (all-day DATE ends are exclusive)
+    start_utc, end_utc = _ics_utc_times()
+    ics = ICS_TPL.format(start_utc=start_utc, end_utc=end_utc, d2=d2, d3=d3).encode()
+    r = c.post(f"/api/schedule/ics?tz={TZ}", content=ics, headers={"Content-Type": "text/calendar"})
+    body = r.json()
+    items = body.get("items", [])
+    check(bool(items), "free-time preview must contain at least one window")
+    pick = [0]
+    confirm = c.post("/api/schedule/ics/confirm", json={"id": body["id"], "pick": pick})
+    check(
+        confirm.status_code == 200 and confirm.json().get("ok") is True,
+        f"confirming the picked window should apply it: {confirm.status_code} {confirm.text[:200]}",
+    )
+    h = c.get("/api/chat/history").json()
+    check(h["state"]["windows"] == 1, f"the picked ICS window should now be stored: {excerpt(h['state'])}")
+    d.say("  a real .ics: two events (one all-day), parsed in memory; only intervals kept; Mia")
+    d.say("  ticked one previewed window and pressed Confirm — the click is the approval stamp")
+    d.counters["windows"] += 1
+
+
+def beat_17_chat_turn(d: Demo) -> None:
+    """The assistant thread. In-process: a scripted provider round trip with a state action.
+    In --live: never spend a real provider call; assert the honest surfaces instead."""
+    c = d.client("mia")
+    h = c.get("/api/chat/history").json()
+    check("messages" in h and "state" in h, "history shape: messages + state + pending")
+
+    if d.b.kind != "in-process":
+        page = c.get("/chat", follow_redirects=False)
+        check(page.status_code == 200, f"GET /chat should render: {page.status_code}")
+        d.say("  live mode: skipped the scripted provider turn (no spend), asserted the chat page")
+        return
+
+    from server import ai, chat as chat_mod
+
+    original = ai.stream_reply
+    original_url = os.environ.get("AI_API_URL")
+
+    async def scripted(system, messages, *, transport=None):
+        yield "Sure, matcha noted. "
+        yield '```json\n{"actions": [{"op": "set_interests", "tags": ["matcha"]}]}\n```\n'
+        yield ai.finished()  # F5: the [DONE] completion marker — without it nothing applies
+
+    try:
+        os.environ["AI_API_URL"] = "https://demo-configured.example/v1/chat/completions"
+        ai_stream = chat_mod.ai.stream_reply
+        chat_mod.ai.stream_reply = scripted
+        r = c.post("/api/chat", json={"content": "I'm into matcha"})
+        check(r.status_code == 200, f"chat turn should stream: {r.status_code} {r.text[:200]}")
+        done = [line for line in r.text.splitlines() if '"done"' in line]
+        actions = [line for line in r.text.splitlines() if '"actions"' in line]
+        check(bool(done) and bool(actions), "stream should end with done and carry an actions event")
+        h = c.get("/api/chat/history").json()
+        check(
+            "matcha" in h["state"]["interests"],
+            f"the assistant's set_interests should land in the chips: {excerpt(h['state'])}",
+        )
+        conn_probe = d.b.probe_db("SELECT tag FROM hobby_tags") if hasattr(d.b, "probe_db") else None
+        if conn_probe:
+            check(any(row[0] == "coffee" for row in conn_probe),
+                  "matcha must be canonicalised to coffee in the matcher's vocabulary")
+        d.say("  Mia told her assistant 'I'm into matcha' → tags applied; matcha counts as coffee")
+        d.counters["tags"] += 1
+    finally:
+        chat_mod.ai.stream_reply = ai_stream
+        ai.stream_reply = original
+        if original_url is None:
+            os.environ.pop("AI_API_URL", None)
+        else:
+            os.environ["AI_API_URL"] = original_url
+
+
+
 BEATS = [
     (1, "register", beat_1_register),
     (2, "pairing", beat_2_pair),
@@ -1058,6 +1187,9 @@ BEATS = [
     (12, "payload/therapy", beat_12_payload),
     (13, "agents settle an activity", beat_13_activity),
     (14, "shared public event", beat_14_shared_event),
+    (15, "manual schedule", beat_15_manual_schedule),
+    (16, "ics → preview → confirm", beat_16_ics_upload),
+    (17, "assistant turn + matcha", beat_17_chat_turn),
 ]
 
 
