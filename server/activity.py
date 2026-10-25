@@ -372,6 +372,8 @@ async def api_propose(request: Request, identity=Depends(get_identity), conn=Dep
     body, err = await _body(request, ProposeBody)
     if err is not None:
         return err
+    if body is None:  # _body returns exactly one of (body, error)
+        return _forbidden("request body must be a JSON object")
     try:
         out = propose(conn, identity.user_id, body.candidate_id, body.proposal_version,
                       body.activity_tag, body.activity_url)
@@ -385,6 +387,8 @@ async def api_respond(request: Request, identity=Depends(get_identity), conn=Dep
     body, err = await _body(request, RespondBody)
     if err is not None:
         return err
+    if body is None:  # _body returns exactly one of (body, error)
+        return _forbidden("request body must be a JSON object")
     try:
         out = respond(conn, identity.user_id, body.candidate_id, body.offer_id, body.response,
                       body.reason, body.activity_tag, body.activity_url)

@@ -400,9 +400,10 @@ def test_confirm_conflict_when_state_changed(client, monkeypatch):
     conflict = client.post("/api/chat/confirm", json={"id": pending_id})
     assert conflict.status_code == 409
     assert conflict.json()["error"] == "conflict"
-    # The pending row survives a conflict so the student can re-ask; cancel clears it.
-    cancel = client.post("/api/chat/confirm", json={"id": pending_id, "cancel": True})
-    assert cancel.json() == {"ok": True, "cancelled": True}
+    # The batch is DEAD: the deletion commits, so the stale preview can never be confirmed.
+    again = client.post("/api/chat/confirm", json={"id": pending_id})
+    assert again.status_code == 404
+    assert again.json()["error"] == "not_found"
 
 
 def test_confirm_expired_preview(client, monkeypatch):
@@ -742,6 +743,103 @@ def test_manual_offer_endpoint_validates_values_too(client, case):
         assert _notes_for(conn, b) == []
     finally:
         conn.close()
+
+
+# ------------------------------------------------------------------ section: confirm outcomes
+# Gate review P1 #10: the old code raised _ConfirmError INSIDE db.immediate, which rolled the
+# transaction back — cancellation answered "ok" while the row survived (still confirmable).
+
+
+def _pending_rows(uid: int) -> int:
+    conn = db.connect()
+    try:
+        return db.one(conn, "SELECT COUNT(*) AS n FROM chat_pending WHERE user_id=?", (uid,))["n"]
+    finally:
+        conn.close()
+
+
+def _rider_counts(uid: int) -> tuple[int, int]:
+    conn = db.connect()
+    try:
+        tags = db.one(conn, "SELECT COUNT(*) AS n FROM hobby_tags WHERE user_id=?", (uid,))["n"]
+        wins = db.one(
+            conn, "SELECT COUNT(*) AS n FROM availability_windows WHERE user_id=?", (uid,)
+        )["n"]
+    finally:
+        conn.close()
+    return tags, wins
+
+
+def test_confirm_cancel_really_deletes_the_row(client, monkeypatch):
+    uid = _register(client)
+    monkeypatch.setattr(
+        chat.ai,
+        "stream_reply",
+        reply_with_fence(
+            [
+                {"op": "set_windows", "windows": [WINDOW_OK]},
+                {"op": "set_interests", "tags": ["matcha"]},
+            ]
+        ),
+    )
+    preview = last_event(client.post("/api/chat", json={"content": "free Thursday"}), "preview")
+    assert _pending_rows(uid) == 1
+
+    cancel = client.post("/api/chat/confirm", json={"id": preview["id"], "cancel": True})
+
+    assert cancel.json() == {"ok": True, "cancelled": True}
+    assert _pending_rows(uid) == 0, "cancellation must COMMIT the deletion"
+    assert _rider_counts(uid) == (0, 0), "cancelling applies no rider"
+    late = client.post("/api/chat/confirm", json={"id": preview["id"]})
+    assert late.status_code == 404 and late.json()["error"] == "not_found"
+
+
+def test_confirm_expiry_deletes_the_row(client, monkeypatch):
+    uid = _register(client)
+    monkeypatch.setattr(
+        chat.ai, "stream_reply", reply_with_fence([{"op": "set_windows", "windows": [WINDOW_OK]}])
+    )
+    preview = last_event(client.post("/api/chat", json={"content": "free"}), "preview")
+
+    db._FIXED_NOW = "2026-10-24T12:30:00Z"  # 30 min later: past the 10-minute TTL
+    expired = client.post("/api/chat/confirm", json={"id": preview["id"]})
+
+    assert expired.status_code == 409 and expired.json()["error"] == "expired"
+    assert _pending_rows(uid) == 0, "expiry must COMMIT the deletion"
+    assert _rider_counts(uid) == (0, 0)
+    again = client.post("/api/chat/confirm", json={"id": preview["id"]})
+    assert again.status_code == 404 and again.json()["error"] == "not_found"
+
+
+def test_confirm_conflict_deletes_the_row_and_applies_no_rider(client, monkeypatch):
+    uid = _register(client)
+    monkeypatch.setattr(
+        chat.ai,
+        "stream_reply",
+        reply_with_fence(
+            [
+                {"op": "set_windows", "windows": [WINDOW_OK]},
+                {"op": "set_interests", "tags": ["matcha"]},
+            ]
+        ),
+    )
+    preview = last_event(client.post("/api/chat", json={"content": "free and matcha"}), "preview")
+
+    conn = db.connect()
+    try:
+        with db.immediate(conn):
+            conn.execute(
+                "INSERT OR REPLACE INTO interest_raw (user_id, raw, canonical) VALUES (?,?,?)",
+                (uid, "bouldering", "bouldering"),
+            )
+    finally:
+        conn.close()
+
+    conflict = client.post("/api/chat/confirm", json={"id": preview["id"]})
+
+    assert conflict.status_code == 409 and conflict.json()["error"] == "conflict"
+    assert _pending_rows(uid) == 0, "a conflicted batch is dead and its row is gone"
+    assert _rider_counts(uid) == (0, 0), "the interest_raw rider must not have applied"
 
 
 # ------------------------------------------------------------------ section: lifecycle

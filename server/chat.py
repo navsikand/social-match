@@ -720,7 +720,7 @@ def _apply_negotiation_op(conn, uid: int, op: dict) -> dict:
         raise _Drop(exc.detail or exc.code) from exc
 
 
-def _committed_fields(conn, result: dict) -> dict:
+def _committed_fields(conn, result: dict) -> dict[str, str | None]:
     """The validated, committed tag/url/reason of the offer the core just wrote."""
     offer_id = result.get("offer_id")
     row = db.one(conn, "SELECT * FROM activity_offers WHERE id=?", (int(offer_id),)) if offer_id else None
@@ -733,13 +733,14 @@ def _negotiation_summary(decided: str, result: dict) -> str:
     """Rendered from the COMMITTED result only — the provider's op values never reach a user."""
     if decided in ("offer", "counter"):
         verb = "offered" if decided == "offer" else "countered with"
-        tag = offers.human_tag(result.get("_tag") or "")
+        tag = offers.human_tag(str(result.get("_tag") or ""))
         return f"{verb} {tag} (round {result.get('round')} of {result.get('max_rounds')})"
     if decided == "accept":
         return "accepted the activity"
     suffix = " — final round" if result.get("exhausted") else ""
     reason = result.get("_reason")
-    return f"passed: {offers.REASON_WORDS.get(reason, reason)}{suffix}"
+    word = offers.REASON_WORDS.get(reason, reason) if isinstance(reason, str) else "no reason given"
+    return f"passed: {word}{suffix}"
 
 
 def _parse_negotiation_ops(actions: list[Any]) -> tuple[dict | None, str | None]:
@@ -1072,82 +1073,98 @@ async def chat_confirm(request: Request, user=Depends(require_session), conn=Dep
     uid = user["id"]
     now = db.utcnow()
     confirmations: list[dict] = []
-    try:
-        with db.immediate(conn):
-            row = db.one(
-                conn,
-                "SELECT * FROM chat_pending WHERE id=? AND user_id=?",
-                (pending_id, uid),
-            )
-            if row is None:
-                raise _ConfirmError(404, "not_found", "no such preview")
-            if cancel:
-                conn.execute("DELETE FROM chat_pending WHERE id=?", (pending_id,))
-                raise _ConfirmError(200, "cancelled", "")
-            if row["expires_at"] < now:
-                conn.execute("DELETE FROM chat_pending WHERE id=?", (pending_id,))
-                raise _ConfirmError(409, "expired", "that preview expired — ask again")
-            if row["state_hash"] != current_state_hash(conn, uid):
-                raise _ConfirmError(
-                    409, "conflict", "your state changed since the preview — ask again"
-                )
-            try:
-                stored = json.loads(row["payload_json"])
-                ops = stored.get("ops") or []
-                items = stored.get("items") or []
-            except Exception:
-                conn.execute("DELETE FROM chat_pending WHERE id=?", (pending_id,))
-                raise _ConfirmError(409, "conflict", "that preview is unreadable — ask again")
-            batch_ops, refusal = _validate_actions(ops)
-            if refusal is not None or batch_ops is None:
-                raise _ConfirmError(
-                    409, "conflict", refusal or "that preview is no longer valid — ask again"
-                )
-            _, normal, errors = _normalize_proposal(batch_ops)
-            window_count = sum(
-                len(op["windows"]) for op in batch_ops if op["op"] == "set_windows"
-            )
-            if window_count > MAX_WINDOWS:
-                errors.append(f"at most {MAX_WINDOWS} windows")
-            if errors:
-                raise _ConfirmError(
-                    409,
-                    "conflict",
-                    "that preview is no longer valid — ask again: " + "; ".join(errors),
-                )
-            has_windows = any(op["op"] == "set_windows" for op in batch_ops)
-            has_events = any(op["op"] == "set_events" for op in batch_ops)
-            try:
-                payload = _merge_ops(
-                    conn,
-                    uid,
-                    batch_ops,
-                    windows_stamp=now if has_windows else None,
-                    events_stamp=now if has_events else None,
-                )
-            except ValidationError as exc:
-                raise _ConfirmError(
-                    409,
-                    "conflict",
-                    f"that preview is no longer valid — ask again: {_first_error(exc)}",
-                )
-            if not _user_alive(conn, uid):
-                raise _ConfirmError(409, "conflict", "your account is no longer available")
-            statewrite.write_state(conn, uid, payload, mode="chat")
-            for op in batch_ops:
-                if op["op"] == "none":
-                    continue
-                summary = _op_summary(op)
-                confirmations.append({"op": op["op"], "summary": summary})
-                persist_note(conn, uid, summary)
-            _ = items
+    outcome: _ConfirmError | None = None
+    with db.immediate(conn):
+        row = db.one(
+            conn,
+            "SELECT * FROM chat_pending WHERE id=? AND user_id=?",
+            (pending_id, uid),
+        )
+        if row is None:
+            outcome = _ConfirmError(404, "not_found", "no such preview")
+        elif cancel:
             conn.execute("DELETE FROM chat_pending WHERE id=?", (pending_id,))
-    except _ConfirmError as exc:
-        if exc.code == "cancelled":
+            outcome = _ConfirmError(200, "cancelled", "")
+        elif row["expires_at"] < now:
+            conn.execute("DELETE FROM chat_pending WHERE id=?", (pending_id,))
+            outcome = _ConfirmError(409, "expired", "that preview expired — ask again")
+        else:
+            outcome = _confirm_apply(conn, uid, int(pending_id), row, now, confirmations)
+    # The transaction has COMMITTED (or rolled back for a real fault) before any response is
+    # built: a cancellation, expiry or conflict is a committed, durable outcome.
+    if outcome is not None:
+        if outcome.code == "cancelled":
             return {"ok": True, "cancelled": True}
-        return _error(exc.status, exc.code, exc.detail)
+        return _error(outcome.status, outcome.code, outcome.detail)
 
     return {"ok": True, "state": state_summary(conn, uid), "confirmations": confirmations}
+
+
+def _confirm_apply(
+    conn, uid: int, pending_id: int, row, now: str, confirmations: list[dict]
+) -> _ConfirmError | None:
+    """Apply one preview inside the caller's transaction. Returns an outcome; NEVER raises.
+
+    Gate review P1 #10: raising through `db.immediate` rolls the transaction back, so the old
+    code answered "cancelled"/"expired"/"conflict" while the row survived — still confirmable —
+    and riders stayed queued (PLAN §B: a dead batch is deleted, re-asking is the recovery).
+    The response is mapped by the caller AFTER the commit.
+    """
+
+    def dead(status: int, code: str, detail: str) -> _ConfirmError:
+        conn.execute("DELETE FROM chat_pending WHERE id=?", (pending_id,))
+        return _ConfirmError(status, code, detail)
+
+    if row["kind"] == "ics":
+        # An ICS preview belongs to the schedule surface: that row is R2's to confirm or
+        # discard, so chat refuses WITHOUT deleting it.
+        return _ConfirmError(
+            422, "payload_forbidden", "preview belongs to /api/schedule/ics/confirm"
+        )
+    if row["state_hash"] != current_state_hash(conn, uid):
+        return dead(409, "conflict", "your state changed since the preview — ask again")
+    try:
+        stored = json.loads(row["payload_json"])
+        ops = stored.get("ops") or []
+    except Exception:
+        return dead(409, "conflict", "that preview is unreadable — ask again")
+    batch_ops, refusal = _validate_actions(ops)
+    if refusal is not None or batch_ops is None:
+        return dead(409, "conflict", refusal or "that preview is no longer valid — ask again")
+    _, items, errors = _normalize_proposal(batch_ops)
+    window_count = sum(len(op["windows"]) for op in batch_ops if op["op"] == "set_windows")
+    if window_count > MAX_WINDOWS:
+        errors.append(f"at most {MAX_WINDOWS} windows")
+    if errors:
+        return dead(
+            409, "conflict", "that preview is no longer valid — ask again: " + "; ".join(errors)
+        )
+    has_windows = any(op["op"] == "set_windows" for op in batch_ops)
+    has_events = any(op["op"] == "set_events" for op in batch_ops)
+    try:
+        payload = _merge_ops(
+            conn,
+            uid,
+            batch_ops,
+            windows_stamp=now if has_windows else None,
+            events_stamp=now if has_events else None,
+        )
+    except ValidationError as exc:
+        return dead(
+            409, "conflict", f"that preview is no longer valid — ask again: {_first_error(exc)}"
+        )
+    if not _user_alive(conn, uid):
+        return dead(409, "conflict", "your account is no longer available")
+    statewrite.write_state(conn, uid, payload, mode="chat")
+    for op in batch_ops:
+        if op["op"] == "none":
+            continue
+        summary = _op_summary(op)
+        confirmations.append({"op": op["op"], "summary": summary})
+        persist_note(conn, uid, summary)
+    _ = items
+    conn.execute("DELETE FROM chat_pending WHERE id=?", (pending_id,))
+    return None
 
 
 _ALLOWED_OFFER_KEYS = {"action", "candidate_id", "proposal_version", "tag", "url", "offer_id", "reason"}
