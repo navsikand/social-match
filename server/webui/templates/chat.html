@@ -84,7 +84,22 @@
 {% block scripts %}
 <script>
   "use strict";
-
+  // The browser knows the IANA zone exactly, so the server never has to ask and never guesses.
+  // Fire-and-forget: harmless if it fails, and cheap enough to repeat on every page load.
+  (function reportTimezone() {
+    let tz = null;
+    try {
+      tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    } catch (err) {
+      tz = null;
+    }
+    if (!tz) return;
+    fetch("/api/profile/tz", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tz: tz }),
+    }).catch(function () { /* the schedule page will retry on its own load */ });
+  }());
   const AI_ENABLED = {{ "true" if ai_enabled else "false" }};
   const transcript = document.getElementById("transcript");
   const chips = document.getElementById("chips");

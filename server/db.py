@@ -45,6 +45,9 @@ _PHOTO_MIGRATIONS = (
     ("photo_path", "ALTER TABLE users ADD COLUMN photo_path TEXT"),
     ("photo_revision", "ALTER TABLE users ADD COLUMN photo_revision INTEGER NOT NULL DEFAULT 0"),
     ("photo_published_at", "ALTER TABLE users ADD COLUMN photo_published_at TEXT"),
+    # The browser knows the IANA zone exactly (Intl.DateTimeFormat().resolvedOptions().timeZone)
+    # and posts it once. Storing it means the assistant never has to ask, and never guesses.
+    ("tz_hint", "ALTER TABLE users ADD COLUMN tz_hint TEXT"),
 )
 
 

@@ -298,6 +298,36 @@ def settings_grants(
     return {"ok": True, "grants": _snapshot_grants(conn, uid)}
 
 
+class TzBody(BaseModel):
+    tz: str
+
+
+@router.post("/api/profile/tz")
+def save_timezone(body: TzBody, user=Depends(sessions.require_session), conn=Depends(db.get_conn)):
+    """The browser's own IANA zone (Intl...resolvedOptions().timeZone), stored once.
+
+    The client already knows this exactly, so the assistant never has to ask and never has an
+    excuse to guess. Validated against the zoneinfo database so a garbage string cannot become
+    a timezone the scheduler later refuses.
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    name = (body.tz or "").strip()
+    if not name or len(name) > 64:
+        raise db.http_error(422, "payload_forbidden", "tz must be an IANA timezone name")
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise db.http_error(422, "payload_forbidden", f"{name!r} is not an IANA timezone name")
+    uid = int(user["id"])
+    with db.immediate(conn):
+        prev = db.one(conn, "SELECT tz_hint FROM users WHERE id=?", (uid,))
+        conn.execute("UPDATE users SET tz_hint=? WHERE id=?", (name, uid))
+    if prev is None or prev["tz_hint"] != name:
+        chat.log.info("tz_hint_set user=%s tz=%s", uid, name)
+    return {"ok": True, "tz": name}
+
+
 # ---------------------------------------------------------------------------- pages
 
 

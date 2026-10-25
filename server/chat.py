@@ -576,7 +576,10 @@ def _last_stored_tz(conn, uid: int) -> str:
             (uid,),
         )
     if row is None:
-        return "unknown — ASK the user for their timezone before proposing any time"
+        # The browser reports its own IANA zone; that is authoritative and needs no asking.
+        row = db.one(conn, "SELECT tz_hint AS tz FROM users WHERE id=?", (uid,))
+    if row is None or not row["tz"]:
+        return "unknown — the browser has not reported a timezone yet; ASK the user for one"
     return row["tz"]
 
 

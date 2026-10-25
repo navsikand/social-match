@@ -54,6 +54,26 @@
 {% endblock %}
 {% block scripts %}
 <script>
+  // The browser's own IANA zone: reported to the server (so the assistant never asks or
+  // guesses) and used to preselect the form when the user has no saved window yet.
+  (function reportTimezone() {
+    let tz = null;
+    try {
+      tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    } catch (err) {
+      tz = null;
+    }
+    if (!tz) return;
+    fetch("/api/profile/tz", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tz: tz }),
+    }).catch(function () { /* kept silent: the form still works with the saved value */ });
+    const select = document.getElementById("tz");
+    if (select && tz && Array.from(select.options).some(function (o) { return o.value === tz; })) {
+      select.value = tz;
+    }
+  }());
   const tzSelect = document.getElementById("tz");
   const rows = document.getElementById("manual-rows");
   const manualStatus = document.getElementById("manual-status");

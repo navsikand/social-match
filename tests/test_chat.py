@@ -97,6 +97,42 @@ def _register(client, email="ch@x.test", name="Chip"):
     return r.json()["user_id"]
 
 
+def test_browser_timezone_is_stored_and_used_by_the_assistant(client):
+    """The browser knows the IANA zone; the assistant must never ask for it or guess."""
+    uid = _register(client)
+
+    # An invalid zone is refused, and nothing is stored.
+    bad = client.post("/api/profile/tz", json={"tz": "Mars/Olympus_Mons"})
+    assert bad.status_code == 422
+    assert bad.json()["error"] == "payload_forbidden"
+
+    ok = client.post("/api/profile/tz", json={"tz": "America/Phoenix"})
+    assert ok.status_code == 200 and ok.json() == {"ok": True, "tz": "America/Phoenix"}
+
+    conn = db.connect()
+    try:
+        assert db.one(conn, "SELECT tz_hint FROM users WHERE id=?", (uid,))["tz_hint"] == "America/Phoenix"
+        assert chat._last_stored_tz(conn, uid) == "America/Phoenix"
+        from server.schema import StatePayload
+
+        prompt = chat.build_system_prompt(conn, uid, chat.Turn(kind="user", user_text="hi"))
+        assert "America/Phoenix" in prompt, "the prompt must carry the stored zone"
+        assert "ASK the user for their timezone" not in prompt
+        assert "CANONICAL SLOTS" in prompt, "the shared grid rule must be present"
+        assert "14:00-17:00" in prompt
+        _ = StatePayload
+    finally:
+        conn.close()
+
+    # Without any report, the prompt must tell it to ASK — never to guess.
+    conn = db.connect()
+    try:
+        other = _register(client, email="tz2@x.test", name="Tz")
+        assert chat._last_stored_tz(conn, other).startswith("unknown")
+    finally:
+        conn.close()
+
+
 def test_history_shape_and_ordering(client):
     uid = _register(client)
     conn = db.connect()
