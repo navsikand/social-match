@@ -1,0 +1,854 @@
+{% extends "base.html" %}
+{% block title %}Chat — Social Match{% endblock %}
+{% block content %}
+<section class="hero">
+  <h1>Your assistant</h1>
+  <p class="muted">Tell it what you want to change — it previews anything that touches your
+    availability or events, and you confirm with one click. Only Settings can change grants.</p>
+  {% if ai_enabled %}
+    <p class="muted small" id="chat-model">Model: {{ model_name or "configured" }}</p>
+  {% endif %}
+</section>
+
+{% if not ai_enabled %}
+<section class="panel" id="ai-banner">
+  <h2>The assistant is not configured</h2>
+  <p class="muted">This server has no <code>AI_API_URL</code> configured, so chat is off. An
+    operator can enable it by setting <code>AI_API_URL</code> (and <code>AI_API_KEY</code> /
+    <code>AI_MODEL</code>) and restarting. Everything else keeps working without it.</p>
+</section>
+{% endif %}
+
+<section class="panel" id="state-panel">
+  <h2>What the assistant knows</h2>
+  <div id="chips" class="tags" aria-live="polite"></div>
+</section>
+
+<section class="panel" id="transcript-panel">
+  <div style="display:flex; align-items:baseline; justify-content:space-between; gap:1rem;">
+    <h2>Conversation</h2>
+    <button id="clear-history" class="linklike" type="button">Clear history</button>
+  </div>
+  <p id="chat-status" class="notice" hidden></p>
+  <div id="transcript" class="stack" aria-live="polite"
+       style="max-height:26rem; overflow-y:auto; gap:0.6rem;"></div>
+
+  <section id="pending" class="panel" hidden>
+    <h3 id="pending-title">Waiting for your confirmation</h3>
+    <p class="muted small">Nothing is saved until you confirm. It expires after 10 minutes.</p>
+    <ul id="pending-items" class="steps"></ul>
+    <p class="photo-actions">
+      <button id="pending-confirm" class="primary" type="button">Confirm</button>
+      <button id="pending-cancel" class="secondary" type="button">Cancel</button>
+    </p>
+  </section>
+
+  {% if ai_enabled %}
+  <form id="composer" class="stack" style="margin-top:1rem;">
+    <label>Message
+      <textarea id="composer-text" rows="3" maxlength="4000"
+                placeholder="e.g. I'm free Thursday evening and into bouldering"></textarea>
+    </label>
+    <p><button id="send" class="primary" type="submit">Send</button></p>
+  </form>
+  {% endif %}
+</section>
+
+<section class="panel" id="negotiations">
+  <h2>Negotiations</h2>
+  <p class="muted small" id="delegation-note">{% if state and state.delegation %}Your assistant can accept, counter or pass offers for you. You can still answer any offer yourself below.{% else %}Your assistant will not answer offers for you — pick Accept, Counter or Pass below to answer one yourself.{% endif %}</p>
+  <p class="muted small" id="negotiations-empty">No open negotiation right now — an activity offer
+    shows up here once a match has a settled time.</p>
+  <div id="negotiations-list" class="stack"></div>
+  {# Closed tag vocabulary, mirroring schema.TAG_VOCAB (closed vocabulary, CONTRACT §5). The
+     /chat page context does not carry it, so the mirror lives here; the UI tests pin this list
+     to schema.TAG_VOCAB so drift fails loudly. #}
+  <template id="tag-options">
+    {% for tag in ["bouldering", "climbing", "hiking", "running", "gym", "swimming", "cycling",
+                   "basketball", "soccer", "tennis", "ultimate_frisbee", "board_games", "video_games",
+                   "chess", "painting", "drawing", "photography", "pottery", "guitar", "piano",
+                   "singing", "live_music", "edm", "techno", "rock", "jazz", "coffee", "baking",
+                   "cooking", "language_exchange", "debate", "anime", "cinema", "volunteering"]
+    %}<option value="{{ tag }}">{{ tag | replace("_", " ") }}</option>{% endfor %}
+  </template>
+  {# offers.REASONS in human words; the UI tests pin these to offers.REASONS / REASON_WORDS. #}
+  <template id="reason-options">
+    <option value="too_expensive">too expensive</option>
+    <option value="too_far">too far</option>
+    <option value="not_my_vibe">not their vibe</option>
+    <option value="wrong_time">the wrong time</option>
+  </template>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  "use strict";
+
+  const AI_ENABLED = {{ "true" if ai_enabled else "false" }};
+  const transcript = document.getElementById("transcript");
+  const chips = document.getElementById("chips");
+  const status = document.getElementById("chat-status");
+  const pendingBox = document.getElementById("pending");
+  const pendingTitle = document.getElementById("pending-title");
+  const pendingItems = document.getElementById("pending-items");
+  const clearButton = document.getElementById("clear-history");
+
+  let abortController = null;
+  // Finding 14: set true by any error/conflict (the status line becomes STICKY), cleared ONLY
+  // when a new user send starts — never by the `done` event that follows a failure.
+  let statusSticky = false;
+
+  // ---------------------------------------------------------------- text helpers
+  // Model/action/error text is rendered ONLY as text nodes — never as markup.
+  function appendTextNodes(el, text) {
+    const parts = String(text == null ? "" : text).split("\n");
+    for (let i = 0; i < parts.length; i += 1) {
+      if (i > 0) el.appendChild(document.createElement("br"));
+      if (parts[i]) el.appendChild(document.createTextNode(parts[i]));
+    }
+  }
+
+  // The trailing ```json action block is protocol, not prose: the server stores it, the
+  // view hides it (the "applied" chip below carries the outcome).
+  function stripActionBlock(text) {
+    const body = String(text == null ? "" : text);
+    const at = body.lastIndexOf("```json");
+    return at === -1 ? body : body.slice(0, at).replace(/\s+$/, "");
+  }
+
+  function messageRow(role, text) {
+    const row = document.createElement("div");
+    row.className = "message " + (role || "note");
+    const label = document.createElement("p");
+    label.className = "muted small";
+    label.textContent = role === "user" ? "You" : (role === "assistant" ? "Assistant" : "Note");
+    row.appendChild(label);
+    const body = document.createElement("p");
+    body.style.margin = "0.15rem 0 0";
+    if (role === "assistant") appendTextNodes(body, stripActionBlock(text));
+    else appendTextNodes(body, text);
+    row.appendChild(body);
+    row.bodyEl = body;
+    transcript.appendChild(row);
+    transcript.scrollTop = transcript.scrollHeight;
+    return row;
+  }
+
+  function chip(text, cls) {
+    const el = document.createElement("span");
+    el.className = cls || "pill";
+    el.textContent = text;
+    return el;
+  }
+
+  function renderChips(state) {
+    if (!state) return;
+    chips.textContent = "";
+    chips.appendChild(chip("windows: " + (state.windows || 0)));
+    chips.appendChild(chip("events: " + (state.events || 0)));
+    const interests = (state.interests || []).join(", ");
+    chips.appendChild(chip("interests: " + (interests || "none")));
+    const wants = (state.wants || []).join(", ");
+    chips.appendChild(chip("wants: " + (wants || "none")));
+    chips.appendChild(chip("busy: " + (state.busy === null || state.busy === undefined
+      ? "unknown" : state.busy)));
+    chips.appendChild(chip("assistant acts on offers: " + (state.delegation ? "on" : "off")));
+  }
+
+  // ---------------------------------------------------------------- status line (finding 14)
+  // An error or conflict must SURVIVE the stream: the server always ends a failed turn with a
+  // `done` event, and the old code hid the status on any event. notify() clears the sticky flag;
+  // notifySticky() raises it. Only a new send clears it (see sendTurn's first line).
+  function notify(text, cls) {
+    statusSticky = false;
+    show(status, text, cls);
+  }
+
+  function notifySticky(text, cls) {
+    statusSticky = true;
+    show(status, text, cls || "error");
+  }
+
+  // ---------------------------------------------------------------- pending preview (13-UI)
+  const WINDOWS_LABEL = "Free windows";
+  const EVENTS_LABEL = "Events";
+  const RIDER_OPS = {set_interests: "interests", set_wants: "wants", set_busy_load: "busy load"};
+  let pendingPicks = [];
+
+  function itemText(kind, item) {
+    if (!item) return "";
+    const when = (item.start || "") + " → " + (item.end || "") +
+      (item.tz ? " (" + item.tz + ")" : "");
+    if (kind === "events") {
+      return (item.category || "event") + ": " + when + (item.url ? " — " + item.url : "");
+    }
+    return when;
+  }
+
+  function kindLabel(kind) {
+    if (kind === "ics") return "Calendar import";
+    if (kind === "events") return EVENTS_LABEL;
+    return WINDOWS_LABEL;
+  }
+
+  // Today's /api/chat/history payload carries ONE kind and `items` as a flat array. F13-core's
+  // contract splits a mixed windows+events batch into typed sections
+  // {"windows": [...], "events": [...]}; accept BOTH shapes and group for display.
+  function pendingSections(pending) {
+    const items = pending && pending.items;
+    if (items && !Array.isArray(items) && typeof items === "object") {
+      const sections = [];
+      if (Array.isArray(items.windows) && items.windows.length) {
+        sections.push({key: "windows", label: WINDOWS_LABEL, kind: "windows", items: items.windows});
+      }
+      if (Array.isArray(items.events) && items.events.length) {
+        sections.push({key: "events", label: EVENTS_LABEL, kind: "events", items: items.events});
+      }
+      return sections;
+    }
+    const kind = (pending && pending.kind) || "windows";
+    const flat = Array.isArray(items) ? items : [];
+    return [{key: kind, label: kindLabel(kind), kind: kind, items: flat}];
+  }
+
+  // Deferred riders ("also updating: interests") ride along with a preview. The history payload
+  // does not expose `ops` today (F13-core carries sections only), so ops are read when present
+  // and the line is simply absent otherwise — never invented.
+  function pendingRiders(pending) {
+    const out = [];
+    const ops = pending && Array.isArray(pending.ops) ? pending.ops : [];
+    for (let i = 0; i < ops.length; i += 1) {
+      const label = RIDER_OPS[ops[i] && ops[i].op];
+      if (label && out.indexOf(label) === -1) out.push(label);
+    }
+    return out;
+  }
+
+  function pickedIndices() {
+    const picked = [];
+    for (let i = 0; i < pendingPicks.length; i += 1) {
+      if (pendingPicks[i].checked) picked.push(parseInt(pendingPicks[i].dataset.pick, 10));
+    }
+    return picked;
+  }
+
+  function renderPending(pending) {
+    pendingItems.textContent = "";
+    pendingPicks = [];
+    delete pendingBox.dataset.pendingId;
+    delete pendingBox.dataset.pendingKind;
+    if (!pending) {
+      pendingBox.hidden = true;
+      return;
+    }
+    const kind = pending.kind || "windows";
+    const sections = pendingSections(pending);
+    const grouped = sections.length > 1;
+    let shown = 0;
+    for (let s = 0; s < sections.length; s += 1) {
+      const section = sections[s];
+      if (grouped) {
+        const heading = document.createElement("li");
+        heading.className = "muted small";
+        heading.textContent = section.label + " (" + section.items.length + ")";
+        pendingItems.appendChild(heading);
+      }
+      for (let i = 0; i < section.items.length; i += 1) {
+        const li = document.createElement("li");
+        if (kind === "ics") {
+          // The ICS confirm endpoint takes the ticked subset as item indices.
+          const box = document.createElement("input");
+          box.type = "checkbox";
+          box.checked = true;
+          box.dataset.pick = String(shown);
+          li.appendChild(box);
+          li.appendChild(document.createTextNode(" "));
+          pendingPicks.push(box);
+        }
+        appendTextNodes(li, itemText(section.kind, section.items[i]));
+        pendingItems.appendChild(li);
+        shown += 1;
+      }
+    }
+    if (!shown) {
+      const li = document.createElement("li");
+      li.textContent = "This preview has no items.";
+      pendingItems.appendChild(li);
+    }
+    const riders = pendingRiders(pending);
+    for (let r = 0; r < riders.length; r += 1) {
+      const li = document.createElement("li");
+      li.className = "muted small";
+      li.textContent = "also updating: " + riders[r];
+      pendingItems.appendChild(li);
+    }
+    const titleKind = kind === "ics" ? "calendar import" : (grouped ? "proposal" : kind);
+    pendingTitle.textContent = "Confirm this " + titleKind + " preview?";
+    pendingBox.hidden = false;
+    pendingBox.dataset.pendingId = String(pending.id);
+    pendingBox.dataset.pendingKind = kind;
+  }
+
+  async function refreshPending() {
+    try {
+      const res = await fetch("/api/chat/history", {headers: {"Accept": "application/json"}});
+      if (res.status === 401) {
+        window.location.href = "/login?next=/chat";
+        return;
+      }
+      if (!res.ok) return;
+      const data = await res.json();
+      renderChips(data.state);
+      renderPending(data.pending);
+      refreshNegotiations();
+    } catch (err) {
+      /* pending refresh is best-effort; the stream already told the story */
+    }
+  }
+
+  // ICS previews belong to the schedule surface: /api/schedule/ics/confirm takes the row id and
+  // the ticked item indices (an empty pick is the cancel path); chat previews keep /api/chat/confirm.
+  function confirmRequest(kind, id, cancel) {
+    if (kind === "ics") {
+      return {url: "/api/schedule/ics/confirm",
+              body: {id: id, pick: cancel ? [] : pickedIndices()}};
+    }
+    return {url: "/api/chat/confirm", body: cancel ? {id: id, cancel: true} : {id: id}};
+  }
+
+  async function confirmPending(cancel) {
+    const id = parseInt(pendingBox.dataset.pendingId || "", 10);
+    if (!id) return;
+    const kind = pendingBox.dataset.pendingKind || "windows";
+    if (kind === "ics" && !cancel && pickedIndices().length === 0) {
+      notify("Tick at least one window to confirm, or press Cancel.", "error");
+      return;
+    }
+    const request = confirmRequest(kind, id, cancel);
+    pendingBox.hidden = true;
+    try {
+      const out = await postJSON(request.url, request.body);
+      if (out.res.status === 401) {
+        window.location.href = "/login?next=/chat";
+        return;
+      }
+      if (!out.res.ok) {
+        notifySticky(apiError(out.res, out.data));
+      } else if (cancel) {
+        notify("Preview cancelled. Nothing was saved.", "info");
+      } else {
+        notify("Saved. Your state chips are updated.", "ok");
+        if (out.data && out.data.state) renderChips(out.data.state);
+      }
+    } catch (err) {
+      notifySticky("Network error — is the server running?");
+    }
+    refreshPending();
+  }
+
+  document.getElementById("pending-confirm").addEventListener("click", function () {
+    confirmPending(false);
+  });
+  document.getElementById("pending-cancel").addEventListener("click", function () {
+    confirmPending(true);
+  });
+
+  // ---------------------------------------------------------------- negotiations (6-UI)
+  // Every control posts to chat.py's MANUAL endpoint /api/chat/offer-respond with exactly the
+  // fields _parse_offer_body expects: accept {candidate_id, offer_id}; counter {candidate_id,
+  // offer_id, proposal_version, tag, url}; pass {candidate_id, offer_id, reason}. A human click
+  // is the consent, so no delegation grant is needed for these.
+  const OFFER_RESPOND_URL = "/api/chat/offer-respond";
+  const negotiationsList = document.getElementById("negotiations-list");
+  const negotiationsEmpty = document.getElementById("negotiations-empty");
+  const tagOptionsTemplate = document.getElementById("tag-options");
+  const reasonOptionsTemplate = document.getElementById("reason-options");
+  let negotiationBusy = false;
+
+  function humanTag(tag) {
+    return String(tag == null ? "" : tag).replace(/_/g, " ");
+  }
+
+  function windowText(item) {
+    if (!item) return "";
+    if (typeof item === "string") return item;
+    return item.display || "";
+  }
+
+  function offerLine(activity) {
+    const tag = humanTag(activity && activity.tag);
+    const host = (activity && activity.host) || "";
+    let line = tag ? tag.charAt(0).toUpperCase() + tag.slice(1) : "An activity";
+    if (host) line += " at " + host;
+    return line;
+  }
+
+  function negotiationButton(text, cls) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = cls;
+    button.textContent = text;
+    return button;
+  }
+
+  function optionSelect(template, label, ariaLabel) {
+    const wrap = document.createElement("label");
+    wrap.appendChild(document.createTextNode(label));
+    const select = document.createElement("select");
+    select.setAttribute("aria-label", ariaLabel);
+    if (template) select.appendChild(template.content.cloneNode(true));
+    wrap.appendChild(select);
+    return {wrap: wrap, select: select};
+  }
+
+  function offerControls(item) {
+    const box = document.createElement("div");
+    const row = document.createElement("p");
+    row.className = "photo-actions";
+    const accept = negotiationButton("Accept", "primary");
+    const counterToggle = negotiationButton("Counter", "secondary");
+    const passToggle = negotiationButton("Pass", "secondary");
+    row.appendChild(accept);
+    row.appendChild(counterToggle);
+    row.appendChild(passToggle);
+    box.appendChild(row);
+
+    const counterBox = document.createElement("div");
+    counterBox.className = "stack";
+    counterBox.hidden = true;
+    const tagField = optionSelect(tagOptionsTemplate, "Activity", "counter activity tag");
+    const urlField = document.createElement("label");
+    urlField.appendChild(document.createTextNode("Link"));
+    const urlInput = document.createElement("input");
+    urlInput.type = "url";
+    urlInput.placeholder = "https://…";
+    urlInput.maxLength = 300;
+    urlField.appendChild(urlInput);
+    const counterSend = negotiationButton("Send counter", "primary");
+    counterBox.appendChild(tagField.wrap);
+    counterBox.appendChild(urlField);
+    counterBox.appendChild(counterSend);
+    box.appendChild(counterBox);
+
+    const passBox = document.createElement("div");
+    passBox.className = "stack";
+    passBox.hidden = true;
+    const reasonField = optionSelect(reasonOptionsTemplate, "Reason", "pass reason");
+    const passSend = negotiationButton("Send pass", "secondary");
+    passBox.appendChild(reasonField.wrap);
+    passBox.appendChild(passSend);
+    box.appendChild(passBox);
+
+    accept.addEventListener("click", function () {
+      respondOffer(item, {action: "accept"});
+    });
+    counterToggle.addEventListener("click", function () {
+      counterBox.hidden = !counterBox.hidden;
+      passBox.hidden = true;
+    });
+    passToggle.addEventListener("click", function () {
+      passBox.hidden = !passBox.hidden;
+      counterBox.hidden = true;
+    });
+    counterSend.addEventListener("click", function () {
+      const tag = tagField.select.value;
+      const url = urlInput.value.trim();
+      if (!tag) {
+        notify("Pick an activity for the counter.", "error");
+        return;
+      }
+      if (!url) {
+        notify("A counter needs an https link.", "error");
+        return;
+      }
+      respondOffer(item, {action: "counter", proposal_version: item.proposal_version,
+                          tag: tag, url: url});
+    });
+    passSend.addEventListener("click", function () {
+      const reason = reasonField.select.value;
+      if (!reason) {
+        notify("Pick a reason to pass.", "error");
+        return;
+      }
+      respondOffer(item, {action: "pass", reason: reason});
+    });
+    return box;
+  }
+
+  function negotiationCard(item) {
+    const card = document.createElement("div");
+    card.className = "card candidate";
+    card.dataset.candidateId = String(item.candidate_id);
+    const activity = item.activity;
+
+    const heading = document.createElement("p");
+    heading.className = "muted small";
+    const when = windowText(item.window);
+    heading.textContent = "Match #" + item.candidate_id + (when ? " · " + when : "");
+    card.appendChild(heading);
+
+    const line = document.createElement("p");
+    appendTextNodes(line, offerLine(activity));
+    card.appendChild(line);
+
+    const meta = document.createElement("p");
+    meta.className = "muted small";
+    let note = "Offer round " + (activity.round || 1) + " of " + (activity.max_rounds || 1);
+    if (activity.state === "offered") {
+      note += activity.proposed_by_you
+        ? " — your offer is waiting for their answer"
+        : " — waiting for your answer";
+    } else if (activity.state === "accepted") {
+      note += " — agreed; confirm the plan on the match card";
+    } else {
+      note += " — this round is closed";
+    }
+    appendTextNodes(meta, note);
+    card.appendChild(meta);
+
+    if (activity.state === "offered" && !activity.proposed_by_you) {
+      card.appendChild(offerControls(item));
+    }
+    return card;
+  }
+
+  async function respondOffer(item, fields) {
+    if (negotiationBusy) return;
+    if (!item || !item.activity || !item.activity.offer_id) return;
+    negotiationBusy = true;
+    const body = {candidate_id: item.candidate_id, offer_id: item.activity.offer_id};
+    for (const key in fields) {
+      if (Object.prototype.hasOwnProperty.call(fields, key)) body[key] = fields[key];
+    }
+    try {
+      const out = await postJSON(OFFER_RESPOND_URL, body);
+      if (out.res.status === 401) {
+        window.location.href = "/login?next=/chat";
+        return;
+      }
+      if (!out.res.ok) {
+        notifySticky(apiError(out.res, out.data));
+        return;
+      }
+      const outState = out.data && out.data.state;
+      if (outState === "accepted") {
+        notify("Offer accepted — the plan still needs both students to confirm it.", "ok");
+      } else if (outState === "passed") {
+        notify(out.data && out.data.exhausted
+          ? "Offer passed. No activity worked out — pick one on the match card."
+          : "Offer passed.", "ok");
+      } else {
+        notify("Counter sent — waiting for their answer.", "ok");
+      }
+    } catch (err) {
+      notifySticky("Network error — is the server running?");
+    } finally {
+      negotiationBusy = false;
+      refreshNegotiations();
+    }
+  }
+
+  // Open candidates come from the session dashboard; the offer for each comes from the agent
+  // activity view (FIXES-chat.md 6-UI: /api/activity/{candidate_id}). That endpoint is
+  // bearer-token-only, and a browser page carries a session cookie, so a refusal falls back to
+  // /api/card/{id}, which returns the same offers.card_view block plus proposal_version.
+  async function loadOffer(candidateId) {
+    let data = null;
+    try {
+      const res = await fetch("/api/agent/activity/" + encodeURIComponent(candidateId), {
+        headers: {"Accept": "application/json"},
+      });
+      if (res.ok) data = await res.json();
+    } catch (err) {
+      data = null;
+    }
+    if (!data) {
+      try {
+        const res = await fetch("/api/card/" + encodeURIComponent(candidateId), {
+          headers: {"Accept": "application/json"},
+        });
+        if (!res.ok) return null;
+        const card = await res.json();
+        data = {
+          candidate_id: card.candidate_id,
+          proposal_version: card.proposal_version,
+          window: card.window && card.window.display,
+          activity: card.activity || null,
+        };
+      } catch (err) {
+        return null;
+      }
+    }
+    if (!data || !data.activity) return null;
+    return {
+      candidate_id: data.candidate_id || candidateId,
+      proposal_version: data.proposal_version,
+      window: typeof data.window === "string"
+        ? data.window : ((data.window && data.window.display) || ""),
+      activity: data.activity,
+    };
+  }
+
+  async function refreshNegotiations() {
+    if (!negotiationsList) return;
+    negotiationsList.textContent = "";
+    const items = [];
+    try {
+      const res = await fetch("/api/dashboard", {headers: {"Accept": "application/json"}});
+      if (res.status === 401) {
+        window.location.href = "/login?next=/chat";
+        return;
+      }
+      if (res.ok) {
+        const data = await res.json();
+        const candidates = (data && data.candidates) || [];
+        for (let i = 0; i < candidates.length; i += 1) {
+          const offer = await loadOffer(candidates[i].candidate_id);
+          if (offer) items.push(offer);
+        }
+      }
+    } catch (err) {
+      /* best effort: the panel simply stays empty when the dashboard call fails */
+    }
+    for (let i = 0; i < items.length; i += 1) {
+      negotiationsList.appendChild(negotiationCard(items[i]));
+    }
+    if (negotiationsEmpty) negotiationsEmpty.hidden = items.length > 0;
+  }
+
+  // ---------------------------------------------------------------- history
+  async function loadHistory() {
+    try {
+      const res = await fetch("/api/chat/history", {headers: {"Accept": "application/json"}});
+      if (res.status === 401) {
+        window.location.href = "/login?next=/chat";
+        return;
+      }
+      if (!res.ok) {
+        let data = null;
+        try { data = await res.json(); } catch (err) { data = null; }
+        notifySticky("Couldn't load the conversation. " + apiError(res, data));
+        return;
+      }
+      const data = await res.json();
+      transcript.textContent = "";
+      const messages = data.messages || [];
+      for (let i = 0; i < messages.length; i += 1) {
+        messageRow(messages[i].role, messages[i].content);
+      }
+      renderChips(data.state);
+      renderPending(data.pending);
+      refreshNegotiations();
+    } catch (err) {
+      notifySticky("Network error — is the server running?");
+    }
+  }
+
+  // ---------------------------------------------------------------- streaming
+  const ERROR_HINTS = {
+    ai_unconfigured: "Chat is not configured on this server (set AI_API_URL).",
+    ai_auth: "The model provider rejected our key — an operator needs to fix it.",
+    ai_timeout: "The assistant took too long to answer. Try again.",
+    ai_http: "The model provider returned an error.",
+    ai_protocol: "The model provider answered in a shape we can't read.",
+    rate_limited: "Too many turns just now — wait a few minutes.",
+    turn_busy: "A turn is already running. Wait for it to finish.",
+  };
+
+  function errorLine(code, detail) {
+    const hint = ERROR_HINTS[code] || "The turn failed.";
+    let text = hint;
+    if (detail) text += " " + detail;
+    if (code) text += " (" + code + ")";
+    return text;
+  }
+
+  function renderLive(live) {
+    if (!live || !live.row || !live.row.bodyEl) return;
+    live.row.bodyEl.textContent = "";
+    appendTextNodes(live.row.bodyEl, stripActionBlock(live.text));
+    transcript.scrollTop = transcript.scrollHeight;
+  }
+
+  function handleEvent(event, live) {
+    if (!event || typeof event.type !== "string") return;
+    if (event.type === "token") {
+      if (live) {
+        live.text += String(event.text || "");
+        renderLive(live);
+      }
+      return;
+    }
+    if (event.type === "actions") {
+      const applied = event.applied || [];
+      for (let i = 0; i < applied.length; i += 1) {
+        chipIntoTranscript("applied: " + (applied[i].summary || applied[i].op || "saved"));
+      }
+      return;
+    }
+    if (event.type === "preview") {
+      renderPending({id: event.id, kind: event.kind, items: event.items || []});
+      chipIntoTranscript("applied: preview ready — confirm below");
+      return;
+    }
+    if (event.type === "note") {
+      // A plain conversational turn echoes the whole assistant text as a note; the live
+      // message already shows it, so only genuinely different notes get their own row.
+      if (!event.text) return;
+      if (live && String(event.text).trim() === stripActionBlock(live.text).trim()) return;
+      messageRow("note", event.text);
+      return;
+    }
+    if (event.type === "state") {
+      renderChips(event.state);
+      return;
+    }
+    if (event.type === "error") {
+      notifySticky(errorLine(event.code, event.detail));
+      return;
+    }
+    if (event.type === "conflict") {
+      notifySticky("Nothing was applied: " + String(event.detail || "your state changed"));
+    }
+  }
+
+  function chipIntoTranscript(text) {
+    const line = document.createElement("p");
+    line.className = "pill";
+    line.textContent = text;
+    transcript.appendChild(line);
+    transcript.scrollTop = transcript.scrollHeight;
+  }
+
+  async function sendTurn(text) {
+    const sendButton = document.getElementById("send");
+    const textarea = document.getElementById("composer-text");
+    if (sendButton) sendButton.disabled = true;
+    if (textarea) textarea.disabled = true;
+    // A NEW SEND is the only thing that clears a sticky error/conflict (finding 14).
+    statusSticky = false;
+    notify("Thinking…", "info");
+    messageRow("user", text);
+
+    abortController = new AbortController();
+    const live = {row: messageRow("assistant", ""), text: ""};
+    let gotEvent = false;
+
+    async function dispatchBlock(block) {
+      const lines = block.split("\n");
+      for (let i = 0; i < lines.length; i += 1) {
+        const line = lines[i];
+        if (line.indexOf("data: ") !== 0) continue;
+        let event = null;
+        try {
+          event = JSON.parse(line.slice(6));
+        } catch (err) {
+          continue;
+        }
+        gotEvent = true;
+        handleEvent(event, live);
+      }
+    }
+
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: {"Content-Type": "application/json", "Accept": "text/event-stream"},
+        body: JSON.stringify({content: text}),
+        signal: abortController.signal,
+      });
+      if (!res.ok) {
+        let data = null;
+        try { data = await res.json(); } catch (err) { data = null; }
+        if (res.status === 401) {
+          window.location.href = "/login?next=/chat";
+          return;
+        }
+        const code = (data && data.error) || "";
+        const detail = (data && data.detail) || "";
+        if (live.row) live.row.remove();
+        notifySticky(errorLine(code, typeof detail === "string" ? detail : ""));
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, {stream: true});
+        let boundary = buffer.indexOf("\n\n");
+        while (boundary !== -1) {
+          const block = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          await dispatchBlock(block);
+          boundary = buffer.indexOf("\n\n");
+        }
+      }
+      buffer += decoder.decode();
+      if (buffer.trim()) await dispatchBlock(buffer);
+
+      if (!gotEvent) {
+        notifySticky("The stream ended without an answer. Try again.");
+      } else if (!statusSticky) {
+        // `done` hides the line ONLY when no error/conflict event raised the sticky flag.
+        status.hidden = true;
+      }
+    } catch (err) {
+      if (err && err.name === "AbortError") return;
+      notifySticky("Network error — is the server running?");
+    } finally {
+      abortController = null;
+      if (sendButton) sendButton.disabled = false;
+      if (textarea) {
+        textarea.disabled = false;
+        textarea.value = "";
+        textarea.focus();
+      }
+      refreshPending();
+    }
+  }
+
+  if (AI_ENABLED) {
+    document.getElementById("composer").addEventListener("submit", function (evt) {
+      evt.preventDefault();
+      const textarea = document.getElementById("composer-text");
+      const text = textarea.value.trim();
+      if (!text) return;
+      textarea.value = "";
+      sendTurn(text);
+    });
+  }
+
+  clearButton.addEventListener("click", async function () {
+    if (!window.confirm("Clear your chat history? The transcript and any pending preview go.")) {
+      return;
+    }
+    try {
+      const res = await fetch("/api/chat", {method: "DELETE"});
+      if (res.status === 401) {
+        window.location.href = "/login?next=/chat";
+        return;
+      }
+      if (!res.ok) {
+        let data = null;
+        try { data = await res.json(); } catch (err) { data = null; }
+        notifySticky(apiError(res, data));
+        return;
+      }
+      transcript.textContent = "";
+      renderPending(null);
+      notify("History cleared.", "ok");
+    } catch (err) {
+      notifySticky("Network error — is the server running?");
+    }
+  });
+
+  window.addEventListener("beforeunload", function () {
+    if (abortController) abortController.abort();
+  });
+
+  loadHistory();
+</script>
+{% endblock %}

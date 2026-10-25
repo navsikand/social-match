@@ -12,6 +12,29 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _str_env(name: str) -> str | None:
+    """Unset or blank means "not configured": callers key features off None."""
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _bool_env(name: str, default: bool = False) -> bool:
+    value = _str_env(name)
+    if value is None:
+        return default
+    return value.lower() in ("1", "true", "yes", "on")
+
+
 def db_path() -> str:
     return os.environ.get("SOCIAL_MATCH_DB", _DB_DEFAULT)
 
@@ -71,3 +94,35 @@ def upload_dir() -> str:
         return explicit
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(root, "uploads")
+
+
+# --- Chat app (CONTRACT-chat.md §1). Unset AI_API_URL means chat is DISABLED, not an error.
+
+
+def ai_api_url() -> str | None:
+    return _str_env("AI_API_URL")
+
+
+def ai_api_key() -> str | None:
+    return _str_env("AI_API_KEY")
+
+
+def ai_model() -> str:
+    return _str_env("AI_MODEL") or ""
+
+
+def ai_max_tokens() -> int:
+    return _int_env("AI_MAX_TOKENS", 800)
+
+
+def ai_timeout_seconds() -> float:
+    return _float_env("AI_TIMEOUT_SECONDS", 60.0)
+
+
+def chat_ttl_days() -> int:
+    return _int_env("AI_TTL_DAYS", 7)
+
+
+def delegation_default_on() -> bool:
+    """Demo-box only: seeds the delegation grant at signup. Absent/off by default."""
+    return _bool_env("DELEGATION_DEFAULT_ON", False)

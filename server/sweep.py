@@ -2,7 +2,7 @@
 materialises that state (deletes rows and stamps derived ones void). FROZEN interface."""
 import asyncio
 import contextlib
-from server import config, db
+from server import chat, config, db
 
 
 PHOTO_GRACE_SECONDS = 3600
@@ -115,6 +115,7 @@ def run_sweep(conn=None) -> dict:
             )
             counts["consent_purged"] = cur.rowcount
             counts["photos_purged"] = purge_orphan_photos(conn)
+            counts["chat_purged"] = chat.purge_chat(conn, now)
         return counts
     finally:
         if own:

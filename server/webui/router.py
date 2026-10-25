@@ -9,11 +9,12 @@ import os
 import sqlite3
 
 from fastapi import APIRouter, Depends, Request, Response
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from jinja2 import TemplateNotFound
 from pydantic import BaseModel
 
-from server import config, db, passwords, scheduling, sessions
+from server import chat, config, db, passwords, scheduling, sessions
 
 router = APIRouter(tags=["webui"])
 
@@ -54,6 +55,7 @@ class PublicationBody(BaseModel):
 class GrantsBody(BaseModel):
     matching: bool | None = None
     publication: PublicationBody | None = None
+    delegation: bool | None = None
 
 
 # ------------------------------------------------------------------------ helpers
@@ -124,9 +126,29 @@ def _upsert_grant(conn, uid: int, kind: str, tier: str | None = None) -> None:
     _log_consent(conn, uid, f"grant:{kind}", kind, {"tier": tier} if tier else {})
 
 
+def _seed_default_grants(conn, uid: int) -> None:
+    """Demo box: signup seeds the delegation grant (version 1) + its consent row."""
+    if not config.delegation_default_on():
+        return
+    conn.execute(
+        "INSERT INTO grants (user_id, kind, tier, version, fields_json, audience,"
+        " granted_at, expires_at) VALUES (?,?,?,?,?,'matched_users_only',?,?)",
+        (
+            uid,
+            "delegation",
+            None,
+            1,
+            json.dumps({"audience": "matched_users_only"}),
+            db.utcnow(),
+            db.utcnow(days=config.grant_ttl_days()),
+        ),
+    )
+    _log_consent(conn, uid, "grant:delegation", "delegation", {})
+
+
 def _snapshot_grants(conn, uid: int) -> dict:
-    out: dict = {"matching": None, "publication": None}
-    for kind in ("matching", "publication"):
+    out: dict = {"matching": None, "publication": None, "delegation": None}
+    for kind in ("matching", "publication", "delegation"):
         row = _live_grant(conn, uid, kind)
         if row is not None:
             out[kind] = {
@@ -190,6 +212,7 @@ def register(body: RegisterBody, response: Response, conn=Depends(db.get_conn)):
                 ),
             )
             uid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            _seed_default_grants(conn, uid)
     except sqlite3.IntegrityError as exc:
         raise db.http_error(
             409, "email_taken", "an account with that email already exists"
@@ -229,7 +252,7 @@ def settings_grants(
     conn=Depends(db.get_conn),
 ):
     uid = int(user["id"])
-    if body.matching is None and body.publication is None:
+    if body.matching is None and body.publication is None and body.delegation is None:
         raise db.http_error(422, "payload_forbidden", "nothing to update")
 
     tier = None
@@ -247,6 +270,13 @@ def settings_grants(
                 # shared leave-matching cascade (availability, open AND matched plans,
                 # counterpart notifications) in this same transaction.
                 scheduling._leave_cascade(conn, uid, "settings")
+        if body.delegation is not None:
+            if body.delegation:
+                _upsert_grant(conn, uid, "delegation")
+            else:
+                prev = _live_grant(conn, uid, "delegation")
+                if prev is not None:
+                    _withdraw_grant(conn, prev, uid, "delegation")
         if body.publication is not None:
             if tier == "off":
                 prev = _live_grant(conn, uid, "publication")
@@ -293,6 +323,47 @@ def settings_page(request: Request, conn=Depends(db.get_conn)):
         "settings.html",
         {"signed_in": True, "user_id": uid, "grants": _snapshot_grants(conn, uid)},
     )
+
+
+@router.get("/chat", response_class=HTMLResponse)
+def chat_page(request: Request, conn=Depends(db.get_conn)):
+    uid = _current_uid(request, conn)
+    if uid is None:
+        return RedirectResponse("/login?next=/chat", status_code=303)
+    return templates.TemplateResponse(
+        request,
+        "chat.html",
+        {
+            "signed_in": True,
+            "ai_enabled": bool(config.ai_api_url()),
+            "model_name": config.ai_model(),
+            "state": chat.state_summary(conn, uid),
+        },
+    )
+
+
+@router.get("/schedule", response_class=HTMLResponse)
+def schedule_page(request: Request, conn=Depends(db.get_conn)):
+    uid = _current_uid(request, conn)
+    if uid is None:
+        return RedirectResponse("/login?next=/schedule", status_code=303)
+    row = db.one(
+        conn,
+        "SELECT tz FROM availability_windows WHERE user_id=? ORDER BY id DESC LIMIT 1",
+        (uid,),
+    )
+    try:
+        return templates.TemplateResponse(
+            request,
+            "schedule.html",
+            {"signed_in": True, "tz_default": row["tz"] if row is not None else "UTC"},
+        )
+    except TemplateNotFound:
+        # Lane C's page is not installed on this build: honest 503, no placeholder page.
+        return JSONResponse(
+            status_code=503,
+            content={"error": "schedule_unavailable", "detail": "the schedule page is not installed"},
+        )
 
 
 @router.get("/m/pair/{code}", response_class=HTMLResponse)

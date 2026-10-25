@@ -27,6 +27,17 @@
 </section>
 
 <section class="panel">
+  <h2>Your assistant</h2>
+  <label class="check">
+    <input type="checkbox" id="delegation" {% if grants.delegation %}checked{% endif %}>
+    Let my assistant accept, counter or pass offers for me
+  </label>
+  <p class="muted small">Off by default. On this demo box, accounts may start with this on
+    (DELEGATION_DEFAULT_ON); you can withdraw it any time, and only this page can change it.</p>
+  <p id="delegation-status" class="notice" hidden></p>
+</section>
+
+<section class="panel">
   <h2>Publication</h2>
   <p class="muted">What a card may show about you when it reaches a matched person.</p>
   <label>Publication tier
@@ -50,6 +61,7 @@
 {% endblock %}
 {% block scripts %}
 <script>
+  const GRANTS_URL = "/api/settings/grants";
   const status = document.getElementById("settings-status");
   const publication = document.getElementById("publication");
   publication.value = publication.dataset.current || "off";
@@ -62,7 +74,7 @@
       publication: {tier: document.getElementById("publication").value},
     };
     try {
-      const out = await postJSON("/api/settings/grants", payload);
+      const out = await postJSON(GRANTS_URL, payload);
       if (out.res.ok) {
         const g = (out.data && out.data.grants) || {};
         show(status, "Saved. Matching is " + (g.matching ? "on" : "off") +
@@ -72,6 +84,37 @@
       }
     } catch (err) {
       show(status, "Network error — is the server running?", "error");
+    }
+  });
+
+  // Delegation is its own grant: post the toggle change immediately, never ride the
+  // sharing-settings save (that would bump versions twice for one click).
+  const delegation = document.getElementById("delegation");
+  const delegationStatus = document.getElementById("delegation-status");
+  delegation.addEventListener("change", async function () {
+    const wanted = delegation.checked;
+    delegation.disabled = true;
+    show(delegationStatus, "Saving…", "info");
+    try {
+      const out = await postJSON(GRANTS_URL, {delegation: wanted});
+      if (out.res.ok) {
+        const g = (out.data && out.data.grants) || {};
+        const live = !!g.delegation;
+        delegation.checked = live;
+        show(delegationStatus, "Saved. Your assistant is " +
+          (live ? "allowed to act on offers." : "not acting on offers."), "ok");
+      } else if (out.res.status === 401) {
+        window.location.href = "/login?next=/settings";
+        return;
+      } else {
+        delegation.checked = !wanted;
+        show(delegationStatus, apiError(out.res, out.data), "error");
+      }
+    } catch (err) {
+      delegation.checked = !wanted;
+      show(delegationStatus, "Network error — is the server running?", "error");
+    } finally {
+      delegation.disabled = false;
     }
   });
 

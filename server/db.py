@@ -61,12 +61,84 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 conn.execute(statement)
 
 
+# The grants table gained kind='delegation' (PLAN-chat-frontend.md §C3). A SQLite CHECK
+# cannot be ALTERed, so deployed databases get a full rebuild. Column list and order are the
+# old ones exactly; tier's CHECK is verbatim; only the kind CHECK grows.
+_GRANTS_COLUMNS = (
+    "id",
+    "user_id",
+    "kind",
+    "tier",
+    "version",
+    "fields_json",
+    "audience",
+    "granted_at",
+    "expires_at",
+    "withdrawn_at",
+)
+
+_GRANTS_NEW_DDL = """
+CREATE TABLE grants_new (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('matching','publication','reveal','delegation')),
+  tier TEXT CHECK (kind != 'publication' OR tier IN ('card','card+name')),
+  version INTEGER NOT NULL,
+  fields_json TEXT,
+  audience TEXT NOT NULL DEFAULT 'matched_users_only',
+  granted_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  withdrawn_at TEXT
+)
+"""
+
+
+def migrate_grants_check(conn: sqlite3.Connection) -> bool:
+    """Rebuild grants with the delegation kind in its CHECK. Idempotent; returns True if it ran.
+
+    Same discipline as _migrate: the read that decides and the DDL that acts happen inside one
+    BEGIN IMMEDIATE, so a racing initializer waits and then finds 'delegation' already there.
+    """
+    with immediate(conn):
+        # Re-read under the write lock: the check outside the transaction would be a race.
+        row = one(conn, "SELECT sql FROM sqlite_master WHERE type='table' AND name='grants'")
+        if row is None or "delegation" in (row["sql"] or ""):
+            return False
+        before = one(conn, "SELECT COUNT(*) AS n FROM grants")["n"]
+        # Any explicit index attached to grants is dropped with the table; recreate it after
+        # the rename. (schema.sql defines none today; a deployed DB may, so read, don't assume.)
+        index_sql = [
+            r["sql"]
+            for r in conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='grants'"
+                " AND sql IS NOT NULL"
+            ).fetchall()
+        ]
+        conn.execute("DROP TABLE IF EXISTS grants_new")  # a crashed prior attempt leaves one
+        conn.execute(_GRANTS_NEW_DDL)
+        cols = ", ".join(_GRANTS_COLUMNS)
+        copied = conn.execute(
+            f"INSERT INTO grants_new ({cols}) SELECT {cols} FROM grants"
+        ).rowcount
+        if copied != before:
+            raise RuntimeError(f"grants rebuild copied {copied} of {before} rows")
+        conn.execute("DROP TABLE grants")
+        conn.execute("ALTER TABLE grants_new RENAME TO grants")
+        for statement in index_sql:
+            conn.execute(statement)
+        after = one(conn, "SELECT COUNT(*) AS n FROM grants")["n"]
+        if after != before:
+            raise RuntimeError(f"grants rebuild left {after} of {before} rows")
+        return True
+
+
 def init_db(path: str | None = None) -> None:
     conn = connect(path)
     try:
         with open(SCHEMA_PATH) as f:
             conn.executescript(f.read())
         _migrate(conn)
+        migrate_grants_check(conn)
     finally:
         conn.close()
 

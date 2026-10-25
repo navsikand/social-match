@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS pairings (
 CREATE TABLE IF NOT EXISTS grants (
   id INTEGER PRIMARY KEY,
   user_id INTEGER NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('matching','publication','reveal')),
+  kind TEXT NOT NULL CHECK (kind IN ('matching','publication','reveal','delegation')),
   tier TEXT CHECK (kind != 'publication' OR tier IN ('card','card+name')),
   version INTEGER NOT NULL,
   fields_json TEXT,
@@ -214,3 +214,35 @@ CREATE TABLE IF NOT EXISTS user_load (
   busy_load INTEGER NOT NULL CHECK (busy_load BETWEEN 0 AND 3),
   FOREIGN KEY (user_id) REFERENCES availability(user_id) ON DELETE CASCADE
 );
+
+-- Chat app (PLAN-chat-frontend.md). Transcript, rate/budget ledger, and the preview store.
+-- created_at/expires_at are UTC 'YYYY-MM-DDTHH:MM:SSZ' like every other table.
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('user','assistant','note')),
+  content TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_chat_messages_user ON chat_messages(user_id);
+
+-- One row per engine call: rate window + autonomy budget. kind='chat' (typed or page
+-- turn), kind='negotiation' (assistant-vs-assistant), ref = 'offer:12' for the latter.
+CREATE TABLE IF NOT EXISTS chat_turns (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  ref TEXT,
+  at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS chat_pending (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  state_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_chat_pending_user ON chat_pending(user_id);

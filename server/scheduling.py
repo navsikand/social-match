@@ -699,6 +699,9 @@ def delete_account(conn, uid: int) -> dict:
             )
         conn.execute("DELETE FROM activity_offers WHERE proposer_id=? OR responder_id=?", (uid, uid))
         conn.execute("DELETE FROM inbox_items WHERE user_id=?", (uid,))
+        # Function-local: chat imports this module at its top, so a module-level import cycles.
+        from server import chat
+        chat.cascade_chat(conn, uid)  # transcript + pending previews + rate rows
         conn.execute(
             "UPDATE consent_log SET detail_json='{}', purge_after=? WHERE user_id_hash=?",
             (purge_after, db.user_hash(uid)),

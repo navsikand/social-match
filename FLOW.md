@@ -1,18 +1,23 @@
 # Social Match — end-to-end flow
 
-Track 2 entry: two students' agents negotiate one real plan, through a server that knows who everyone is and tells
+Track 2 entry: two students' assistants negotiate one real plan, through a server that knows who everyone is and tells
 nobody anything they haven't published.
 
-Cubbie is the sensor and the mouth — it already has Canvas and the calendar. Our server is the broker. The website is
-where a face, a swipe and a confirmation live, because those need a signed-in session.
+The chat app in this repo is the interface: the student signs in, talks to their own assistant, and keeps the card, the
+swipe and the confirmation on the same site, because those need a signed-in session. The Cubbie skill is the
+**legacy / alternate client** — it reads the calendar on the phone and POSTs the same redacted payload, and its
+endpoints and pairing flow are unchanged. Where the two paths differ, this document says so.
 
 Where this document and `PLAN.md` disagree, this one wins: it is newer. `PLAN.md` remains correct on pairing, tokens
-and `/inbox`.
+and `/inbox`. `PLAN-chat-frontend.md` (approved) wins over this file for the chat app: §1c, §2 (delegation), §7 (chat
+writes), §10 (chat tables) and §12 (new demo beats) are reconciled to it.
 
 ## One open question, stated up front
 
 Whether a Cubbie Skill may send **calendar-derived** availability to a host that is not on Cubbie's sub-processor list.
-Cubbie's Privacy Policy restricts transfers to its listed sub-processors, and our server is not one of them.
+Cubbie's Privacy Policy restricts transfers to its listed sub-processors, and our server is not one of them. This is the
+**legacy skill path only**: the chat app takes windows you type, or an `.ics` you upload yourself, and neither involves
+Cubbie or a Cubbie-side transfer.
 
 Cubbie computes free time locally, reduces it to ranges, and reads those back to the student before anything leaves.
 That reduces what is exposed and puts the student in control of the decision. It does **not** change who performs the
@@ -22,7 +27,7 @@ calendar-derived availability.** Until then the demo runs on synthetic fixtures.
 
 ---
 
-## 1. The flow
+## 1. The flow — legacy client path
 
 ```text
  ┌─ 0. PRECONDITION — every invocation, not once in a linear script ─────────────┐
@@ -41,7 +46,7 @@ calendar-derived availability.** Until then the demo runs on synthetic fixtures.
  3. State check   GET /me → expired rows are treated as void and swept. Window is
         │          STATE_TTL_DAYS (default 7).
         ▼
- 4. Collect       Cubbie works out the free time itself: Canvas deadlines, class
+ 4. Collect       Cubbie (the legacy client) works out the free time itself: Canvas deadlines, class
         │          schedule, and the free-time script it already ships. Then it
         │          reads the result back before anything leaves — "you're free
         │          Thu 7-9 and Sat 6-11, and I've got climbing + live music.
@@ -74,7 +79,7 @@ calendar-derived availability.** Until then the demo runs on synthetic fixtures.
                    demo: the demo ends at both_confirmed, with a confirmed time.
 ```
 
-## 1b. The loop between the two clocks
+## 1b. The loop between the two clocks (legacy client)
 
 The link in step 9 is not decoration — it is how a decision gets **back into Cubbie**, which cannot be called from
 outside.
@@ -88,7 +93,6 @@ our server ──► student's Cubbie ──► text with name + link ──► 
 ```
 
 The website never pushes to Cubbie. It writes a row; the other agent reads it when it next polls. That is the only
-The website never pushes to Cubbie. It writes a row; the other agent reads it when it next polls. That is the only
 direction the integration can run, and it is why step 11 is a state machine rather than a message.
 
 **A right swipe is a version-bound confirmation, not a separate thing.** It carries the `proposal_version` the card was
@@ -101,7 +105,34 @@ phone on their next check-in. Say that out loud rather than implying realtime.
 
 ---
 
-## 2. Consent: four grants, and one photo publication
+## 1c. The chat path, which is the default now
+
+The same server, with the student talking to their own assistant instead of to Cubbie:
+
+```text
+1. Sign in     /chat. No pairing, no phone. Disabled banner if the deployment has no AI_API_URL.
+2. Talk        "I'm free Thu 7-9 and Sat after 6, and I'm into climbing and matcha."
+               -> the assistant streams a reply and ends with ONE json action block, last.
+3. Preview     set_windows / set_events do NOT write: the server normalises them (<=8 h each, <=20 total,
+               horizon-checked) and stores ONE pending preview. The UI shows it with Confirm / Cancel.
+4. Confirm     the click is the provenance. statewrite(mode="chat") writes the payload once; the chips
+               re-render and the transcript gets a server-templated note.
+5. Immediate   set_interests / set_wants / set_busy_load apply at once when they are the whole batch.
+6. Schedule    or skip the chat: /schedule has a manual form and a bounded .ics upload -> preview with
+               checkboxes -> confirm. Only intervals are ever stored; the file is read once in memory.
+7. Match       unchanged: §1 step 6 onward. The card, the swipe and the confirmation are still the website.
+8. Negotiate   if both students delegate, their assistants settle the activity against each other (§2,
+               delegation) and each is told "found a match — go swipe". Swiping and confirming stay human.
+```
+
+Two invariants hold on every one of these paths. Chat-mode writes **never** touch a grant — the grant-preserving
+`statewrite(mode="chat")` exists for exactly that. And every apply re-checks the account's liveness and the state hash
+captured when the system prompt was built: a stale snapshot is a typed `conflict` with nothing written, and the
+transcript says so.
+
+---
+
+## 2. Consent: five grants, and one photo publication
 
 Server-enforced, recorded in `consent_log`, revocable, and re-checked at the moment each one is relied on.
 
@@ -111,6 +142,16 @@ Server-enforced, recorded in `consent_log`, revocable, and re-checked at the mom
 | **Publication · card** | "Show a card to people you match with?" | A pseudonym, a preset avatar, your hobby tags | Serving a card, and again at confirmation | Card stops being served; served cards withdrawn |
 | **Publication · name** | "Put your first name on that card and in the text, or stay a pseudonym?" | Display name, to **matched users only** — never public, never searchable | Serving a card, **and composing the notification** | Name reverts to the pseudonym on future cards and texts; texts already sent are not recallable |
 | **Reveal** | "Open a way to message this person, once you both say yes?" — **designed, not in the demo** | A contact channel — a pair-scoped thread — **not** the name | At the reveal step, for that pair only | Channel closed; the match keeps whatever was already published |
+| **Delegation** | "Let my assistant accept, counter or pass offers for me?" — **off by default** | Accept/counter/pass on an activity offer for a match you already hold — never a swipe, never a plan confirmation | At each autonomous negotiation decision, inside the write transaction | Stop deciding; in-flight decisions are dropped, nothing applied; matches, cards and plans are untouched |
+
+**Delegation is the fifth grant, and its only runtime writer is the Settings page.** `kind='delegation'` is **off by
+default**: a real deployment gets it only when the student flips the toggle in Settings. No chat operation
+can create, renew, restore or withdraw it — no such op exists in the action protocol, and `statewrite(mode="chat")`
+firewalls grants exactly as it firewalls matching and publication. The demo box seeds it at registration via
+`DELEGATION_DEFAULT_ON=1` (version 1 plus a `consent_log` row in the registration transaction) so the negotiation
+segment runs hands-free. Withdrawal is a Settings act and it takes effect at the decision itself: the apply transaction
+re-reads `withdrawn_at IS NULL AND expires_at > now`, so a withdrawal racing a streaming turn drops the op and writes an
+honest note. It never covers swiping or confirming a plan.
 
 ```jsonc
 // publication_grant — the version that was approved is the version that is served
@@ -125,7 +166,7 @@ Server-enforced, recorded in `consent_log`, revocable, and re-checked at the mom
 }
 ```
 
-**Publishing a photo is a fifth consent act, and deliberately not a fifth row.** The upload control on the student's
+**Publishing a photo is a sixth consent act, and deliberately not a sixth row.** The upload control on the student's
 own settings page *is* the consent, and it is bound to one revision of one image rather than to a `grants` tier:
 
 - absent photo = off; nothing is published implicitly;
@@ -157,7 +198,8 @@ all of these hold at the moment of use — never cached:
 A photo fetch that fails any of these — including the owner's own preview after they remove it — is **`404`**, never
 `403`, so the route cannot be used to probe who has a photo or a card.
 
-So the pseudonymous path needs two grants and the named path needs three. A missing name grant never blocks a card — it
+So the pseudonymous path needs two grants and the named path needs three. Delegation is orthogonal to that count: it
+gates negotiation, never what a card shows. A missing name grant never blocks a card — it
 demotes it to the pseudonym. If X edits their card, `version` increments and the old grant stops qualifying: that is a
 re-approval, not a silent republication.
 
@@ -165,13 +207,14 @@ re-approval, not a silent republication.
 
 ---
 
-## 3. Retention and deletion: three operations
+## 3. Retention and deletion: four operations
 
 | Operation | Student says | Deletes | Keeps |
 | --- | --- | --- | --- |
 | **Revoke agent** | "disconnect this Cubbie" | this pairing's token; availability rows this agent wrote | other pairings; the account and its grants |
 | **Leave matching** | "stop matching me" | matching grant; live availability; candidates for and against them; open proposals; served cards and any existing match's discovery state | account and publication grants, inert without matching |
-| **Delete account** | "delete everything" | account row, profile, card, all grants, availability, windows, tags, swipes, candidates, matches, proposals, pairings, and every `consent_log` row whose payload is personal | a signed-deletion record; pseudonymous `blocks`; audit rows stripped to `{hash, action, timestamp}` |
+| **Clear chat** | "clear my history" | your chat transcript, and any pending preview | the rate-limit rows — clearing history is a user right, not a way to buy a fresh turn allowance |
+| **Delete account** | "delete everything" | account row, profile, card, all grants, availability, windows, tags, swipes, candidates, matches, proposals, pairings, the chat transcript, pending previews, chat turn rows, and every `consent_log` row whose payload is personal | a signed-deletion record; pseudonymous `blocks`; audit rows stripped to `{hash, action, timestamp}` |
 
 Three details that have to be true rather than claimed:
 
@@ -193,6 +236,9 @@ Three details that have to be true rather than claimed:
 | Swipes | 30 days | Prevents re-showing someone you passed on |
 | Closed matches | 30 days | Enough to dispute or report |
 | `consent_log` | While the account is live; 90 days stripped on deletion | Proving what was agreed, then just that something was |
+| Chat transcript | `AI_TTL_DAYS` (7) from each message, then purged | The assistant needs context; a week is enough to read back |
+| Pending preview | 10 minutes, or until confirmed, cancelled or superseded | A proposal you have not agreed to is not data worth keeping |
+| Chat turn rows | Longer than the 10-minute rate window they serve; timestamps and a kind, no message text | Rate limiting that transcript deletion cannot reset |
 
 ---
 
@@ -269,8 +315,12 @@ A trusted Skill is not a security boundary, so the claim is about what the serve
 ```
 
 - Unknown keys are **rejected with 422**, not ignored — a Skill that tries to send more fails loudly in testing.
-- `tags` must come from a server-published list; free text is rejected.
+- `tags` are free text in the student's own words, and they are the only free-text field *in structured state*: at most
+  8, at most 32 characters each, no control characters or line breaks. The server canonicalises each one onto the closed
+  vocabulary and rejects anything outside those bounds; the raw words never reach another student.
 - Windows are bounded: at most 20 per payload, ≤8 hours each, within 30 days, with an explicit timezone.
+- There is **no delegation field** in this payload. `consent` carries matching and publication only; delegation is
+  written by the Settings page alone and `statewrite(mode="chat")` never creates or renews it.
 - `student_confirmed_at` is a **client-supplied acknowledgement, not proof.** It is recorded in `consent_log` bound to
   the accepted payload hash and the pairing, so we can show *what the agent said the student agreed to*. It does not
   verify that a human read it — the server cannot verify an utterance, as `PLAN.md` says. Provenance, not verification.
@@ -289,15 +339,19 @@ a redaction pass before the request is built.
 | Concern | Position |
 | --- | --- |
 | Who can be discovered | **Invite-only, consenting adults**, on the team's own devices. Not open signup |
-| Identity | **A preset avatar, or one published photo, and no free-text bio.** The photo is optional, re-encoded from pixels with all metadata stripped before storage, and deletable in one press |
+| Identity | **A preset avatar, or one published photo, and no free-text bio.** The photo is optional, re-encoded from pixels with all metadata stripped before storage, and deletable in one press. A chat transcript is not a bio: it never appears on a card or in a notification |
 | Photos | One per account, JPEG/PNG, ≤5 MB upload, long edge 1600 px after resize. Shown only to signed-in holders of the live card, **before either side confirms**; `no-store`; **404 for every refusal**, owner's own preview included. No automated moderation: a report hides the pair at once and a named team member responds |
-| Chat | **None in the demo.** Reveal (a pair-scoped thread) is deferred: the demo ends at a confirmed time, and talking happens off-platform |
+| Chat | **The assistant chat is the interface**, and it is bounded: 4,000 characters per typed turn, a 200-message history, 7 days of retention, 20 turns per 10 minutes. It is addressed to your own assistant and is never another student's feed. A turn sends your text, the last 40 messages and a system prompt of your own state to the model provider named in the configuration — see the privacy policy; we do not control that provider's retention. Reveal (a pair-scoped thread between two students) is still deferred: talking happens off-platform |
 | Reporting | One report → auto-hide both directions immediately, plus a named moderator on the team with takedown |
 | Blocking | Bilateral, checked before candidate generation, so a blocked person cannot reappear |
 | Repeat accounts | Out of scope for the demo, and said so |
 | Screenshots | Cannot be prevented. Stated in the card UI and in our policy |
 | Age | 18+ self-attestation, labelled as attestation |
 | Moderator access | Reports only; per-user browsing logged and limited |
+| Chat writes | Every chat and schedule write goes through `statewrite(mode="chat")` — **grant-preserving**: no grant is created, renewed, restored or withdrawn, and account liveness plus the state hash are revalidated inside the write transaction |
+| Pending previews | Windows and events never write from a stream. A **Confirm click** is required and it stamps `free_time.student_confirmed_at` / `events_confirmed_at`; a stale state hash refuses with nothing applied. Tags, wants and busy apply immediately when they are the whole batch |
+| Negotiation ops | Assistant-context only — a typed turn can never emit offer/accept/counter/pass. One op per turn, applied with the delegation grant, account liveness and offer version revalidated in-transaction; 3 rounds at most, and 2 failed provider attempts per offer before the assistant posts a manual Accept/Counter/Pass card |
+| Transcript partition | The counterpart gets one server-templated note of fixed fields (decision, tag, link, reason code) — never provider prose, never your profile fields |
 
 None of this makes the layer safe in the sense a real product needs. It makes it honest.
 
@@ -338,7 +392,7 @@ and kept here so the answer exists if a judge asks.
 | Ranges only; never titles, attendees, locations | Minimisation. A range is not a life |
 | No course codes | A minimisation choice, not a policy prohibition. The enrollment leak is not worth the signal |
 | Token hashing, revocation, agent ids | Basic hygiene |
-| A published sub-processor list of our own | We ask the same transparency of ourselves |
+| The one outside processor is named in our own policy | Chat turns go to the model provider in the configuration; we ask the same transparency of ourselves, and we say plainly that we do not control its retention |
 | 30-day closed-match expiry, 90-day audit residue | Retention we can defend out loud |
 
 ### Documents we must write
@@ -374,10 +428,20 @@ revoke_intents (user_id, created_at)                  -- written before any lock
 
 swipes       (user_id, candidate_id, direction, created_at)   -- right | left | block
 blocks       (user_id_hash, blocked_user_hash, created_at, expires_at)
+
+chat_messages (id, user_id, role, content, created_at)   -- role: 'user' | 'assistant' | 'note'
+chat_pending  (id, user_id, created_at, expires_at, kind, payload_json, state_hash)
+              -- kind: 'windows' | 'events' | 'ics'; one row per user; payload already validated
+chat_turns    (id, user_id, kind, ref, at)               -- rate rows; kind 'chat' | 'negotiation', ref = 'offer:42'
 ```
 
 - **Availability is keyed per user but records the writing agent**, so "revoke this agent" means something. Newest
   observation wins; `source` says whether Cubbie computed it or the student typed it.
+- **The chat tables have their own clocks.** `chat_messages` holds the student's text, the assistant's text and
+  server-templated notes; the sweep purges rows older than `AI_TTL_DAYS` (7), and account deletion cascades all three
+  chat tables in the existing transaction. `chat_pending` is at most one row per user with a 10-minute TTL, deleted on
+  confirm, cancel or supersede. `chat_turns` stores no message text and outlives transcript deletion, which is what
+  makes "clear history" not a rate-limit reset.
 - **No availability version history** is kept — that is the whole claim. What it does not claim: tags, match reasons,
   swipes and closed matches are retained and *are* a profile of interests. §3's retention table is the honest inventory
   of that, with a clock on each.
@@ -391,6 +455,7 @@ blocks       (user_id_hash, blocked_user_hash, created_at, expires_at)
 | Public discovery, open signup | Invite-only proves the mechanism; a public launch needs policy work we haven't done |
 | Events and any booking path | Out of the demo — see §8 |
 | Automated moderation of photos | Nothing scans an image before it is served. A report hides the pair at once and a named team member responds; a real classifier needs training data and an appeals path we don't have |
+| Automated moderation of chat and provider content | Nothing scans a chat turn or a model reply before the student sees it. The bounds (per-turn length, turn rate, one op per turn, a closed op enum, a grant-preserving write mode) limit the blast radius, not the content. A real filter needs training data and an appeals path we don't have |
 | Repeat-account prevention | Needs identity verification, which needs a product decision |
 | Automated audit and backup machinery | A **policy commitment**, not a claim of implementation |
 | Multi-agent conflict beyond revoke | One pairing per demo user; `written_by_agent_id` exists so revoke is meaningful |
@@ -400,7 +465,7 @@ blocks       (user_id_hash, blocked_user_hash, created_at, expires_at)
 
 ---
 
-## 12. Demo script (~2 minutes)
+## 12. Demo script (~2½ minutes)
 
 | Time | Shot |
 | --- | --- |
@@ -414,10 +479,20 @@ blocks       (user_id_hash, blocked_user_hash, created_at, expires_at)
 | 1:40 | Ben confirms: both see the same time. Then Ava revokes — her web session updates at once, Ben's phone says so on his next check-in |
 | 1:48 | Ava's settings: *Publish this photo on my card*. Ben's open card shows the photo; the response is `no-store`. She presses remove — the same URL is a 404 and the preset avatar is back |
 | 1:55 | The card: *"What our server accepted: 2 time ranges, 2 tags, one confirmation, and a name she chose to publish, plus a photo she published from her own settings page. What it rejects with a 422: classes, grades, calendar titles, and any photo an agent tries to send."* |
+| 2:05 | **Chat, immediate apply** (`/chat`): "I'm free Tue 6-8 and Thu 7-9, into climbing." The reply streams; the tag op applies as the message lands and the chip rail flips — the words are a paraphrase, the chips are the record |
+| 2:15 | **Chat, preview** (same page): ask for the windows. The assistant shows a normalised list and a **Confirm** card; the chips have not moved. Press Confirm — the chips change and a server-templated note says what was applied. Cancel a second proposal to show nothing writes |
+| 2:25 | **Schedule** (`/schedule`): upload an `.ics`. The preview lists the computed ≤8 h windows; tick two, confirm. Re-upload the same file with an `RRULE` line → `422` naming the line, not silently free time. Point out the DB has no title, location or attendee in it |
 
 Both demo students grant `card+name`, which is the point of the shot: a name before confirmation. Granting only `card`
 would produce the same demo with `climber-7f2a` in place of every name — worth filming as the second take if there's
 time, because it's the honest demonstration of the default.
+
+**Delegation segment (both demo accounts seeded via `DELEGATION_DEFAULT_ON=1`).** Cut to the two assistants: X
+(A's assistant) proposes an activity through `activity.propose`; Y (B's assistant) counters with another shared tag and a
+reason code; X accepts. Each step appears in its own student's chat as a short structured note — decision, tag, link,
+reason — and neither student's prose crosses. Then the humans: each gets "found a match — go swipe", swipes right, and
+confirms. Say out loud what did **not** happen: no assistant swiped and no assistant confirmed a plan. Withdraw
+delegation in Settings mid-segment and show the next counter dropped with an honest note, nothing applied.
 
 The revocation beat at 1:40 is the part most teams won't have, and it answers "what happens when someone changes their
 mind". The payload card answers "why should I trust you".
@@ -433,7 +508,8 @@ closing time, read live with `python3 scripts/hackathon.py status`. Don't plan t
 
 1. **Calendar-derived availability** needs written confirmation from the Cubbie organizers before it ships. Until then,
    the demo uses synthetic fixtures and availability is labelled `source: 'cubbie_computed'` with a recorded student
-   confirmation.
+   confirmation. This is the **legacy skill path only**: typed windows and a self-uploaded `.ics` never involve Cubbie,
+   and the chat deployment does not depend on that gate.
 2. **Does discovery survive at all?** It doubles the policy surface for a feature the judges didn't ask for. Keep the
    invite-only version for the demo; put public profiles on the "next" slide.
 3. **Who moderates?** A named person on the team for the demo. A real answer is a support rota, which we don't have.

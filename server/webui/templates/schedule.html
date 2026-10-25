@@ -1,0 +1,258 @@
+{% extends "base.html" %}
+{% block title %}Schedule — Social Match{% endblock %}
+{% block content %}
+<section class="hero">
+  <h1>Your free time</h1>
+  <p class="muted">Matching only ever looks at the windows saved here. An uploaded calendar file is
+    read once, in memory, and reduced to time ranges — event titles, locations, descriptions and
+    guests are never stored, and the file never touches the disk.</p>
+</section>
+
+<section class="panel" id="manual-panel">
+  <h2>Set your windows by hand</h2>
+  <label>Your timezone
+    <select id="tz">
+      <option value="America/Los_Angeles" selected>America/Los_Angeles</option>
+      <option value="America/New_York">America/New_York</option>
+      <option value="Europe/London">Europe/London</option>
+      <option value="Europe/Berlin">Europe/Berlin</option>
+      <option value="Asia/Kolkata">Asia/Kolkata</option>
+      <option value="Asia/Singapore">Asia/Singapore</option>
+      <option value="UTC">UTC</option>
+    </select>
+  </label>
+  <div id="manual-rows"></div>
+  <p>
+    <button id="add-row" class="secondary" type="button">Add window</button>
+    <button id="save-manual" class="primary" type="button">Save windows</button>
+  </p>
+  <p class="muted">Up to 20 windows. Each one lasts at most 8 hours and has to start in the future.
+    Saving replaces the whole list — what is on this page is what gets stored.</p>
+  <p id="manual-status" class="notice" hidden></p>
+</section>
+
+<section class="panel" id="ics-panel">
+  <h2>Upload a calendar file</h2>
+  <p><input id="ics-file" type="file" accept=".ics,text/calendar"></p>
+  <p><button id="upload" class="primary" type="button">Upload and preview</button></p>
+  <p class="muted">Plain, single events only. Recurring events, timezone definitions, durations and
+    period values are refused with an explanation rather than guessed at; times that fall into a
+    daylight-saving gap are refused too. The timezone above is used for times without one.</p>
+  <p id="ics-status" class="notice" hidden></p>
+</section>
+
+<section class="panel" id="preview-panel" hidden>
+  <h2>Preview — pick the windows to save</h2>
+  <p id="preview-tz" class="muted"></p>
+  <div id="preview-list"></div>
+  <p>
+    <button id="confirm" class="primary" type="button">Save selected</button>
+    <button id="cancel" class="secondary" type="button">Discard preview</button>
+  </p>
+  <p id="preview-status" class="notice" hidden></p>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+  const tzSelect = document.getElementById("tz");
+  const rows = document.getElementById("manual-rows");
+  const manualStatus = document.getElementById("manual-status");
+  const icsStatus = document.getElementById("ics-status");
+  const previewPanel = document.getElementById("preview-panel");
+  const previewTz = document.getElementById("preview-tz");
+  const previewList = document.getElementById("preview-list");
+  const previewStatus = document.getElementById("preview-status");
+  const MAX_ROWS = 20;
+  let pendingId = null;
+
+  function addRow(start, end) {
+    if (rows.children.length >= MAX_ROWS) {
+      show(manualStatus, "You can add at most " + MAX_ROWS + " windows.", "error");
+      return;
+    }
+    const row = document.createElement("p");
+    row.className = "manual-row";
+    const date = document.createElement("input");
+    date.type = "date";
+    const from = document.createElement("input");
+    from.type = "time";
+    const to = document.createElement("input");
+    to.type = "time";
+    const dateLabel = document.createElement("label");
+    dateLabel.textContent = "Day";
+    dateLabel.appendChild(date);
+    const fromLabel = document.createElement("label");
+    fromLabel.textContent = "From";
+    fromLabel.appendChild(from);
+    const toLabel = document.createElement("label");
+    toLabel.textContent = "To";
+    toLabel.appendChild(to);
+    const drop = document.createElement("button");
+    drop.type = "button";
+    drop.className = "linklike";
+    drop.textContent = "Remove";
+    drop.addEventListener("click", function () { row.remove(); });
+    row.appendChild(dateLabel);
+    row.appendChild(fromLabel);
+    row.appendChild(toLabel);
+    row.appendChild(drop);
+    rows.appendChild(row);
+    if (start) date.value = start;
+    if (end) from.value = end;
+  }
+
+  function iso(local) {
+    // "2026-10-29" + "19:00" -> "2026-10-29T19:00:00" (local wall time; the tz is sent separately)
+    return local.length === 16 ? local + ":00" : local;
+  }
+
+  document.getElementById("add-row").addEventListener("click", function () { addRow(); });
+
+  document.getElementById("save-manual").addEventListener("click", async function () {
+    const windows = [];
+    for (const row of rows.children) {
+      const inputs = row.querySelectorAll("input");
+      const day = inputs[0].value;
+      const from = inputs[1].value;
+      const to = inputs[2].value;
+      if (!day && !from && !to) continue;
+      if (!day || !from || !to) {
+        show(manualStatus, "Every row needs a day, a start and an end.", "error");
+        return;
+      }
+      windows.push({start: iso(day + "T" + from), end: iso(day + "T" + to)});
+    }
+    show(manualStatus, "Saving…", "info");
+    try {
+      const out = await postJSON("/api/schedule/windows", {tz: tzSelect.value, windows: windows});
+      if (out.res.ok) {
+        const n = (out.data && out.data.state && out.data.state.windows) || 0;
+        show(manualStatus, "Saved. " + n + " window" + (n === 1 ? "" : "s") + " stored.", "ok");
+      } else {
+        show(manualStatus, apiError(out.res, out.data), "error");
+      }
+    } catch (err) {
+      show(manualStatus, "Network error — is the server running?", "error");
+    }
+  });
+
+  function prettyWindow(item) {
+    const start = String(item.start || "");
+    const end = String(item.end || "");
+    return start.slice(0, 10) + "  " + start.slice(11, 16) + " – " + end.slice(11, 16);
+  }
+
+  function renderPreview(items, tz) {
+    previewList.textContent = "";
+    if (!items || items.length === 0) {
+      previewPanel.hidden = true;
+      pendingId = null;
+      return;
+    }
+    previewTz.textContent = "Times are local wall time in " + tz + ". Saving replaces the windows on this page.";
+    for (let i = 0; i < items.length; i++) {
+      const label = document.createElement("label");
+      label.className = "check";
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = true;
+      box.value = String(i);
+      label.appendChild(box);
+      label.appendChild(document.createTextNode(" " + prettyWindow(items[i])));
+      previewList.appendChild(label);
+    }
+    previewPanel.hidden = false;
+    previewStatus.hidden = true;
+  }
+
+  document.getElementById("upload").addEventListener("click", async function () {
+    const file = document.getElementById("ics-file").files[0];
+    if (!file) {
+      show(icsStatus, "Choose a .ics file first.", "error");
+      return;
+    }
+    show(icsStatus, "Reading the file on the server…", "info");
+    let res, data;
+    try {
+      res = await fetch("/api/schedule/ics?tz=" + encodeURIComponent(tzSelect.value), {
+        method: "POST",
+        body: file,
+      });
+      data = null;
+      try { data = await res.json(); } catch (err) { data = null; }
+    } catch (err) {
+      show(icsStatus, "Network error — is the server running?", "error");
+      return;
+    }
+    if (!res.ok) {
+      show(icsStatus, apiError(res, data), "error");
+      previewPanel.hidden = true;
+      return;
+    }
+    pendingId = data.id;
+    const count = (data.items || []).length;
+    show(icsStatus, "Found " + count + " free window" + (count === 1 ? "" : "s") + ". Tick what you want below.", "ok");
+    renderPreview(data.items, data.tz);
+  });
+
+  document.getElementById("confirm").addEventListener("click", async function () {
+    if (pendingId === null) return;
+    const pick = [];
+    for (const box of previewList.querySelectorAll("input[type=checkbox]")) {
+      if (box.checked) pick.push(parseInt(box.value, 10));
+    }
+    show(previewStatus, "Saving…", "info");
+    try {
+      const out = await postJSON("/api/schedule/ics/confirm", {id: pendingId, pick: pick});
+      if (out.res.ok) {
+        const n = (out.data && out.data.state && out.data.state.windows) || 0;
+        previewPanel.hidden = true;
+        pendingId = null;
+        show(icsStatus, "Saved " + n + " window" + (n === 1 ? "" : "s") + ".", "ok");
+      } else {
+        show(previewStatus, apiError(out.res, out.data), "error");
+      }
+    } catch (err) {
+      show(previewStatus, "Network error — is the server running?", "error");
+    }
+  });
+
+  document.getElementById("cancel").addEventListener("click", async function () {
+    if (pendingId === null) {
+      previewPanel.hidden = true;
+      return;
+    }
+    try {
+      const out = await postJSON("/api/schedule/ics/confirm", {id: pendingId, pick: []});
+      previewPanel.hidden = true;
+      pendingId = null;
+      if (out.res.ok) show(icsStatus, "Preview discarded. Nothing was saved.", "info");
+      else show(icsStatus, apiError(out.res, out.data), "error");
+    } catch (err) {
+      show(icsStatus, "Network error — is the server running?", "error");
+    }
+  });
+
+  (async function () {
+    addRow();
+    try {
+      const res = await fetch("/api/schedule/pending", {headers: {"Accept": "application/json"}});
+      if (res.status === 401) { window.location.href = "/login?next=/schedule"; return; }
+      if (!res.ok) return;
+      const data = await res.json();
+      const items = (data && data.items) || [];
+      if (items.length === 0) return;
+      if (data.tz) {
+        let known = false;
+        for (const option of tzSelect.options) if (option.value === data.tz) known = true;
+        if (known) tzSelect.value = data.tz;
+      }
+      pendingId = data.id;
+      show(icsStatus, "An unsaved upload preview is still open — it expires shortly.", "info");
+      renderPreview(items, data.tz);
+    } catch (err) {
+      /* the page works without a preview */
+    }
+  })();
+</script>
+{% endblock %}
