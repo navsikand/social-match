@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""demo/scenario.py — CONTRACT §14, thirteen scripted beats, assertable AND watchable.
+"""demo/scenario.py — CONTRACT §14, fourteen scripted beats, assertable AND watchable.
 
 Run it:
 
@@ -190,7 +190,7 @@ class Demo:
         self.run_id = secrets.token_hex(3)
         self.reg_code = os.environ.get("REGISTRATION_CODE", "cubbie2026")
         self.u: dict[str, dict] = {}
-        self.counters = {"windows": 0, "tags": 0, "acks": 0, "states": 0, "offers": 0, "answers": 0}
+        self.counters = {"windows": 0, "tags": 0, "acks": 0, "states": 0, "offers": 0, "answers": 0, "events": 0}
         self.wire: list[dict] = []  # every agent-negotiation body we POST, so beat 13 can audit it
         self._anon = None
         self.cid = 0
@@ -986,6 +986,63 @@ def beat_13_activity(d: Demo) -> None:
     d.say("  an offer with a title field, or a plain-http link -> refused (422 payload_forbidden)")
 
 
+def beat_14_shared_event(d: Demo) -> None:
+    """Pairing signals: two students sent the same PUBLIC event page; only that overlap is shown."""
+    d.register("noor", "Noor", 3)
+    d.register("omar", "Omar", 4)
+    for key in ("noor", "omar"):
+        d.pair(key)
+    wed = window(WED, 18, 20)
+    day = wed[0][:10]
+    fair = "https://careers.asu.example.edu/fall-fair"
+    show = "https://shows.example.com/synthwave-night"
+
+    def ev(url: str, category: str, start_h: int, end_h: int) -> dict:
+        return {"url": url, "start": f"{day}T{start_h:02d}:00", "end": f"{day}T{end_h:02d}:00",
+                "tz": TZ, "category": category}
+
+    # Noor's agent found the fair in her inbox, swapped the personal invite for the public page,
+    # and she approved the list. Omar sends the same page (a different spelling) plus a show only he has.
+    r = d.post_state_ok("noor", windows=[wed], tags=["pottery"], source="student", tier="card+name",
+                        extra={"events": [ev(fair, "career", 10, 14)],
+                               "events_confirmed_at": utc_now(), "busy_load": 2})
+    check(r.json()["events"]["stored"] == [fair], f"stored links: {r.json()}")
+    d.say(f"  Noor sends 1 public event + a busy score of 2 → stored as {r.json()['events']['stored']}")
+    r = d.post_state_ok("omar", windows=[wed], tags=["pottery"], source="student", tier="card+name",
+                        extra={"events": [ev(fair + "/?utm_source=newsletter&rsvp=abc123", "career", 10, 14),
+                                          ev(show, "music", 20, 23)],
+                               "events_confirmed_at": utc_now(), "busy_load": 1})
+    check(fair in r.json()["events"]["stored"] and not any("abc123" in u for u in r.json()["events"]["stored"]),
+          f"the personal part of the link was dropped: {r.json()}")
+    d.say("  Omar sends the same page spelled differently, plus a show only he has → the ?query part is dropped")
+
+    cands = d.dashboard("noor")
+    check(len(cands) == 1, f"Noor should have exactly one card: {cands}")
+    cid = int(cands[0]["candidate_id"])
+    body = d.card("noor", cid).json()
+    check(body["reasons"].get("shared_events") == [{"url": fair, "category": "career"}],
+          f"the card shows the event both have: {body['reasons']}")
+    check(show not in json.dumps(body) and "abc123" not in json.dumps(body),
+          "Omar's other event and the personal part of his link never reach Noor's card")
+    d.say("  Noor's card: \"You both have this career event\" — and nothing about Omar's show")
+
+    # What is refused: a title, a plain-http link, and a list the student did not approve.
+    bad = [
+        ({"events": [dict(ev(fair, "career", 10, 14), title="Interview with Acme")],
+          "events_confirmed_at": utc_now()}, "an event title"),
+        ({"events": [ev("http://careers.example.edu/fair", "career", 10, 14)],
+          "events_confirmed_at": utc_now()}, "an http link"),
+        ({"events": [ev(fair, "career", 10, 14)]}, "no approval stamp"),
+        ({"busy_load": 9}, "a busy score of 9"),
+    ]
+    for extra, label in bad:
+        r = d.state("noor", windows=[wed], tags=["pottery"], source="student", tier="card+name", extra=extra)
+        check(r.status_code == 422 and r.json().get("error") == "payload_forbidden",
+              f"{label} should be refused: {r.status_code} {r.text}")
+    d.say("  refused (422): an event title, an http link, an unapproved list, a busy score of 9")
+    d.counters["events"] += 3
+
+
 BEATS = [
     (1, "register", beat_1_register),
     (2, "pairing", beat_2_pair),
@@ -1000,6 +1057,7 @@ BEATS = [
     (11, "no-overlap/block/report", beat_11_no_overlap_block_report),
     (12, "payload/therapy", beat_12_payload),
     (13, "agents settle an activity", beat_13_activity),
+    (14, "shared public event", beat_14_shared_event),
 ]
 
 
@@ -1067,6 +1125,10 @@ def print_summary(demo: Demo, results: list[dict]) -> None:
     print(
         f"  negotiation: {demo.counters['offers']} offers (a tag + an https link), {demo.counters['answers']} answers"
         " (accept | counter | pass + a reason code); budgets, prices, venue names: never sent"
+    )
+    print(
+        f"  signals:     {demo.counters['events']} public event links (link + time + category), busy score 0-3;"
+        " event titles, senders, locations, email text: never sent"
     )
     print(
         "  rejected:    calendar titles (e.g. 'Therapy - Dr. Ruiz'), class names, grades, photos"

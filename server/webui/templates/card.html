@@ -160,6 +160,23 @@
       el.textContent = p;
       reasonsEl.appendChild(el);
     }
+    // A public event link you BOTH have. textContent only; the link is clickable only if it
+    // is https (the server already guarantees that, this is the belt to its braces).
+    for (const ev of (reasons.shared_events || [])) {
+      const el = document.createElement("p");
+      el.appendChild(document.createTextNode("You both have this " + (ev.category || "other") + " event: "));
+      if (typeof ev.url === "string" && /^https:\/\//.test(ev.url)) {
+        const a = document.createElement("a");
+        a.href = ev.url;
+        a.rel = "noopener noreferrer";
+        a.target = "_blank";
+        a.textContent = ev.url.replace(/^https:\/\//, "");
+        el.appendChild(a);
+      } else {
+        el.appendChild(document.createTextNode("(link hidden)"));
+      }
+      reasonsEl.appendChild(el);
+    }
 
     const tagsEl = document.getElementById("tags");
     tagsEl.innerHTML = "";

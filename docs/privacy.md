@@ -24,6 +24,13 @@ Only these things, and only because matching does not work without them:
   never scored.
 - Wants: zero to two words from `hangout` and `event` — whether you would rather meet up or go to an
   event. Nothing else fits the field, so nothing else can be written into it.
+- Public events: if you approve it, up to ten links to public event pages (a career fair, a concert), each with its
+  start and end time and one category from a fixed list (career, club, talk, music, sports, arts, food, party,
+  volunteer, other). No event title, sender, location or email text is accepted. We store the link without anything
+  after a `?`, because invitation emails often put a personal code there. Another student only ever sees an event if you
+  both sent the same link, and then only that link and its category.
+- How busy you are: one whole number from 0 to 3 for the next two weeks. It is worked out on your phone from Canvas and
+  your calendar; no course names or deadlines are sent. Nobody else sees it.
 - Consent log: one row per grant, publication or withdrawal, recording the action, its scope and when it happened.
 - Activity offers: when your agent and another student's agent settle what to do, we store each offer: an interest
   tag from the same closed vocabulary, an https link, the round number, which side offered it, and the answer (accept,
@@ -40,10 +47,12 @@ field for them and the validator refuses unknown fields at every level of the pa
 - calendar event titles, attendees, or locations;
 - course codes, course names, professor names, or assignment names;
 - grades, of any kind, anywhere;
-- free text of any description, with two bounded exceptions. Interests (the tags above) are capped at 32 characters each
-  and at most eight of them, and are canonicalised before they are used for anything. The other is the https link on an
+- free text of any description, with three bounded exceptions. Interests (the tags above) are capped at 32 characters each
+  and at most eight of them, and are canonicalised before they are used for anything. The second is the https link on an
   activity offer: we check it (https only, plain ASCII, at most 300 characters, a real domain name, no password in it,
-  no #fragment, no IP address), the server never opens it, and anyone following it is leaving this server.
+  no #fragment, no IP address), the server never opens it, and anyone following it is leaving this server. The third is
+  the link on a public event, checked the same way and stored without its `?` part. We cannot tell a public page from a
+  page that has a personal code in its path, which is why your agent shows you each link before it is sent.
 
 That is the point of the design: your Cubbie agent reads your calendar on your phone, turns it into time ranges plus
 tags, and deletes the rest. What reaches this server is a handful of intervals and a few words from a closed list.
@@ -80,7 +89,8 @@ HOW LONG WE KEEP IT
 
 There is one rule per kind of data, and the server enforces each one:
 
-- Availability expires 7 days after it was observed. Expired availability is never read, even before it is deleted.
+- Availability expires 7 days after it was observed. Expired availability is never read, even before it is deleted. Your
+  public events and busy number go with it.
 - Closed matches, swipes and match reasons are kept 30 days, and the activity offers made on a match go with it.
 - The consent log is kept while your account exists. When you delete your account it is stripped down to a pseudonymous
   id (a salted hash, not your account id or email), the action, its scope, and the timestamp — the detail payload is

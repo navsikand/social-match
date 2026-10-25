@@ -8,7 +8,7 @@ evening lines up. Calendar titles, attendees, locations and course codes never l
   confirmation question.
 - `scripts/pair.py` — pair this phone with the server (`--start`, `--finish`, `--status`, `--forget`, `--selftest`).
 - `scripts/bus.py` — inbox and state (`--poll`, `--send-state`, `--revoke`, `--whoami`, `--selftest`).
-- `payload.example.json` — a valid CONTRACT S5 payload to copy the shape from. The dates are illustrative: windows
+- `payload.example.json` — a valid CONTRACT S5 payload (windows, tags, public events, `busy_load`) to copy the shape from. The dates are illustrative: windows
   must fall inside the next 30 days at the moment they are sent.
 
 ## Requirements
@@ -53,8 +53,9 @@ and none should be added.
   The kit documents no schema for `cubbie.yaml` anywhere — `schemas.md` covers `evals.json`, `history.json`,
   `grading.json`, `metrics.json`, `timing.json`, `benchmark.json`, `comparison.json` and `analysis.json`, not
   manifests — and `cubbie-capabilities.md` and `cubbie-auth.md` say nothing about one either.
-- `cubbie.yaml` ships as self-documentation and **Cubbie ignores it** (the kit's structure check warns exactly
-  that). `SKILL.md` is the source of truth — a Skill is the folder.
+- **`cubbie.yaml` is a harmless declaration, not a gate.** It lists the one host the scripts call. The kit says it is
+  "not needed, ignored", and a real Cubbie told us on 24 Oct that listing a host there does not grant access: scripts can
+  make HTTPS requests on port 443 either way. `SKILL.md` is the source of truth — a Skill is the folder.
 - Sign-in is approach 4 in `cubbie-auth.md` (CLI login with a link), expressed as two steps because the server's
   pairing flow is start-then-approve: `pair.py --start` prints the link, `pair.py --finish CODE` saves the pairing.
   There is no key to paste and nothing that belongs in the chat.

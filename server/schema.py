@@ -15,9 +15,16 @@ import datetime
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
-from server import db
+from server import db, events as events_mod
 
 # Closed vocabulary (CONTRACT §5) — exact order, exact strings.
 TAG_VOCAB: list[str] = [
@@ -150,6 +157,53 @@ class FreeTime(_ForbidExtra):
         return self
 
 
+class PublicEvent(_ForbidExtra):
+    """One public event. A link, a time and a category; nothing else is accepted."""
+
+    url: str
+    start: str
+    end: str
+    tz: str
+    category: Literal[events_mod.EVENT_CATEGORIES]  # type: ignore[valid-type]
+
+    @field_validator("url")
+    @classmethod
+    def _url_is_public_page(cls, value: str) -> str:
+        try:
+            return events_mod.canonical_url(value)
+        except ValueError as exc:
+            raise ValueError(str(exc).replace("activity_url", "event url")) from exc
+
+    @field_validator("tz")
+    @classmethod
+    def _tz_must_load(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except Exception as exc:
+            raise ValueError(f"tz is not a known IANA timezone: {value!r}") from exc
+        return value
+
+    @model_validator(mode="after")
+    def _check_span(self) -> "PublicEvent":
+        start = _parse_local(self.start, "start")
+        end = _parse_local(self.end, "end")
+        if start >= end:
+            raise ValueError("event start must be strictly before end")
+        hours = (end - start).total_seconds() / 3600.0
+        if hours > events_mod.MAX_EVENT_HOURS:
+            raise ValueError(
+                f"event duration {hours:g}h exceeds the {events_mod.MAX_EVENT_HOURS}h maximum"
+            )
+        zone = ZoneInfo(self.tz)
+        now = _now_utc()
+        if end.replace(tzinfo=zone).astimezone(datetime.UTC) <= now:
+            raise ValueError("event has already ended")
+        horizon = now + datetime.timedelta(days=events_mod.EVENT_HORIZON_DAYS)
+        if start.replace(tzinfo=zone).astimezone(datetime.UTC) > horizon:
+            raise ValueError(f"event starts more than {events_mod.EVENT_HORIZON_DAYS} days out")
+        return self
+
+
 class Publication(_ForbidExtra):
     tier: Literal["card", "card+name"]
 
@@ -166,6 +220,33 @@ class StatePayload(_ForbidExtra):
     wants: list[str] = Field(default_factory=list)
     free_time: FreeTime
     consent: Consent
+    # Pairing signals (Track 2). All optional, all bounded, all replaced on every post.
+    # `events` are PUBLIC events only (see server/events.py); `events_confirmed_at` is
+    # provenance that the student approved that list on their phone, like free_time's.
+    # `busy_load` is one coarse number for how heavy the next two weeks look (0 light .. 3
+    # heavy), computed from Canvas and the calendar; course names and titles never leave.
+    events: list[PublicEvent] = Field(default_factory=list, max_length=events_mod.MAX_EVENTS)
+    events_confirmed_at: str | None = None
+    busy_load: StrictInt | None = Field(default=None, ge=0, le=3)
+
+    @field_validator("events_confirmed_at")
+    @classmethod
+    def _events_ack_must_parse(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            datetime.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except (ValueError, AttributeError) as exc:
+            raise ValueError("events_confirmed_at is not a valid ISO datetime") from exc
+        return value
+
+    @model_validator(mode="after")
+    def _events_need_ack(self) -> "StatePayload":
+        if self.events and not self.events_confirmed_at:
+            raise ValueError(
+                "events requires events_confirmed_at (student approval of the event list)"
+            )
+        return self
 
     @field_validator("tags")
     @classmethod

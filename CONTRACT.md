@@ -114,7 +114,12 @@ as `StatePayload`. Exact shape:
   "tags": ["climbing", "live_music"],      // 0..5, from TAG_VOCAB exactly, closed
   "wants": ["hangout", "event"],           // subset of hangout|event
   "free_time": {"source": "student"} | {"source": "cubbie_computed", "student_confirmed_at": "2026-10-24T09:10:00Z"},
-  "consent": {"matching": true, "publication": {"tier": "card+name"}}   // tier: card | card+name
+  "consent": {"matching": true, "publication": {"tier": "card+name"}},  // tier: card | card+name
+  // Pairing signals (Track 2), all optional, replaced on every post:
+  "events": [ {"url": "https://careers.asu.example.edu/fall-fair", "start": "2026-10-30T10:00",
+               "end": "2026-10-30T14:00", "tz": "America/Phoenix", "category": "career"} ],   // 0..10
+  "events_confirmed_at": "2026-10-24T09:10:00Z",   // REQUIRED when events is non-empty (provenance, not proof)
+  "busy_load": 2                                   // whole number 0..3, nothing else
 }
 ```
 
@@ -124,6 +129,15 @@ Validation (422 `payload_forbidden` w/ detail on violation):
 - `free_time.source == "cubbie_computed"` REQUIRES `student_confirmed_at` (client-supplied acknowledgement:
   provenance, not proof — never call it verification).
 - `consent.matching false` is valid: store nothing but a consent_log entry.
+- `events[]` (server/events.py): `extra="forbid"`; `url` passes the same checks as an activity link and is stored
+  canonical as `https://host/path` (host lower-cased, `:443`, trailing `/` and everything after `?` dropped);
+  `category` in `career|club|talk|music|sports|arts|food|party|volunteer|other`; start<end, duration ≤24h, not already
+  over, starts within 30 days; ≤10 events. `busy_load` is a strict integer 0..3 (`true`, `"2"`, `1.5` are refused).
+  Events and `busy_load` live in `user_events` / `user_load`, which cascade from `availability`, so expiry, leave-matching,
+  delete-account and pairing revoke remove them with it. Matching adds 4 points per link both students sent and lists
+  `shared_events: [{url, category}]` (the intersection only) in the card reasons; `refresh_events` re-derives that part on
+  open cards when either side posts again. The rule baseline ignores `busy_load` on purpose (a ranking model is compared
+  against it).
 
 Write path (one `immediate` txn): delete existing windows+tags for user; convert window (start,end,tz) local→UTC;
 upsert `availability` (`payload_hash`=sha256 canonical json, `observed_at=now`, `expires_at=now+STATE_TTL_DAYS`,
@@ -362,10 +376,15 @@ prevention, E2E email, moderation UI. Deferred items stay absent from code, not 
   encrypted backups until they expire, within 14 days."
 - 18+ is self-attestation, not age verification.
 - Activity offers (Track 2): an offer is a tag from the closed vocabulary plus an https link and nothing else; the link is
-  the only free-form string the server accepts and it is validated, never fetched. Reason codes are a closed list of
+  the only free-form string on an offer and it is validated, never fetched (public-event links get the same checks, see below). Reason codes are a closed list of
   four. The demo's agents are scripted stand-ins: in production the choosing is done by each student's Cubbie following
   `social-match/SKILL.md`, and the server cannot verify that an agent applied its student's rules.
 - Agents agreeing on an activity is NOT the plan being on: each student still confirms their own side, and wording must
   never say "it's on" or "you're on" before both have.
+- Public events (Track 2): an event is a link to a public page, a time and one category from a closed list, and nothing
+  else; no title, sender, location or email text is accepted. The student approves the list on their phone
+  (`events_confirmed_at`, provenance not proof). The server validates the link's shape, drops the `?query`, never opens it,
+  and cannot tell a public page from one with a personal code in its path. A match sees an event only if both students
+  sent the same page. `busy_load` is one agent-computed number the server cannot verify.
 - The server accepts allowlisted payloads AND REJECTS everything else with 422; we do NOT claim trusted Skill code
   cannot send data elsewhere.

@@ -22,13 +22,13 @@ The product rationale is in `FLOW.md`. The implementation contract, section by s
 uv sync                                   # install the server (Python >= 3.11)
 cp .env.example .env                      # every value optional; defaults shown in the file
 uv run uvicorn server.app:app --reload    # http://localhost:8000
-uv run pytest -q                          # 164 tests, a few seconds
+uv run pytest -q                          # 211 tests, a few seconds
 ```
 
 Then open <http://localhost:8000/register>, enter the invite code (`REGISTRATION_CODE`, default `cubbie2026`), tick the
 18+ attestation, and you get the dashboard, the card and swipe pages, settings, and the inbox the Skill polls.
 
-> Run the end-to-end demo with `uv run python demo/scenario.py` — thirteen asserted beats over the
+> Run the end-to-end demo with `uv run python demo/scenario.py` — fourteen asserted beats over the
 > real HTTP API (register → pair → state → match → card → confirm → idempotent re-confirm →
 > revoke → counter → no-overlap → block/report → therapy-payload rejection), ending with the
 > honest "what crossed the wire" summary. For filming against a live server:
@@ -54,7 +54,7 @@ Then open <http://localhost:8000/register>, enter the invite code (`REGISTRATION
 | `server/webui/` | Templates + routes for register, login, dashboard, card, matches, settings, privacy, terms, pair-approve. |
 | `schema.sql` | Authoritative schema (SQLite). |
 | `social-match/` | The Cubbie Skill: `SKILL.md`, `scripts/pair.py`, `scripts/bus.py`, `payload.example.json`. |
-| `tests/` | 164 tests: payload allowlist, matching, activity negotiation, concurrency, pairing, inbox/sweep, web UI, review regressions. |
+| `tests/` | 211 tests: payload allowlist, matching, public-event signals, activity negotiation, concurrency, pairing, inbox/sweep, web UI, review regressions. |
 | `references/` | Cubbie platform docs used to shape the Skill. |
 | `docs/` | This repo's privacy policy and terms, which the server itself serves at `/privacy` and `/terms`. |
 
@@ -91,7 +91,7 @@ version that was approved is the version that gets served.
 ## Judge hooks
 
 **Prototype + scenario script.** The prototype is the running app: register → pair a Skill → send a state payload →
-get a card → agents settle an activity → both students confirm → counter or revoke. `demo/scenario.py` runs thirteen
+get a card → agents settle an activity → both students confirm → counter or revoke. `demo/scenario.py` runs fourteen
 asserted beats over the real HTTP API; beat 13 is the agent negotiation.
 
 **Conflicting constraints** — the interesting beats, and where each is proven:
@@ -144,10 +144,16 @@ These are limits of what we built, stated plainly. `CONTRACT.md` §16 makes keep
    production the searching and the choosing are done by each student's Cubbie following `SKILL.md`, which this repo
    cannot run; the server cannot verify that an agent applied its student's rules. Agents only hear each other when they
    poll (pull, not push), so an answer can take until the next check-in.
-4. **The activity link is the one free-form string.** It is validated (https, ASCII, ≤300 chars, real domain, no
+4. **Links are the free-form strings.** The activity link and the public-event link are validated (https, ASCII, ≤300 chars, real domain, no
    credentials, no fragment, no IP address) and never fetched by the server, but it is still a string a bad agent could
    choose. The Skill tells the agent to use only links it found in a public search.
-5. **The demo runset is invite-only and small.** It was run on team devices, with fictional students and synthetic
+5. **Event links are validated, not vetted.** A student's agent finds public event pages and the student approves the
+   list, but the server only checks the link's shape and drops everything after `?`. It cannot tell a public page from a
+   page with a personal code in its path, and it never opens the link. Two students match on an event only when their
+   links are the same page after cleaning; a different URL for the same event will not match.
+6. **`busy_load` is a rough number the agent chose.** It comes from Canvas's last sync and the calendar, 0 to 3, and the
+   server cannot check it. The rule-based matcher ignores it, so it does nothing yet except wait for a ranking model.
+7. **The demo runset is invite-only and small.** It was run on team devices, with fictional students and synthetic
    calendars. That is enough to show the loop closing; it is not a population, a load test, or a safety record.
 
 ## Documentation

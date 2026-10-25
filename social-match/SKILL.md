@@ -6,15 +6,17 @@ description: Finds students at your school whose free time and interests overlap
 # Social Match
 
 Most students are not short of friends. They are short of the last step: both people are free on Thursday, both like
-climbing, and neither finds out. This Skill does that one thing. It reads the student's own calendar and Canvas,
-turns them into a short list of free windows plus a few interest tags, sends only that to a small matching server, and
-texts the student when someone has an evening that fits.
+climbing, and neither finds out. This Skill does that one thing. It reads the student's own calendar, Canvas and the
+events in their inbox, turns them into a short list of free windows, a few interest tags, the public events they could
+go to, and one coarse "how busy" number, sends only that to a small matching server, and texts the student when someone
+has an evening that fits.
 
 Two rules run through everything here:
 
 - **Nothing leaves the phone until the student reads it and says yes**, in their own words, in the same conversation.
-- **Calendar contents never leave the phone.** Not titles, not attendees, not locations, not course codes. What leaves
-  is a handful of time ranges and a few tags from a fixed list.
+- **Calendar and email contents never leave the phone.** Not titles, not attendees, not locations, not course codes,
+  not a word of any email. What leaves is a handful of time ranges, a few tags, a short list of links to public event
+  pages the student approved, and one number from 0 to 3.
 
 ## Before you start: the server
 
@@ -76,6 +78,8 @@ Read the student's free time for the next two weeks:
 - Canvas for what is coming due, so a free window is not five hours before a paper is due
 - their own words in this conversation
 
+Do the calendar, Canvas and inbox in **one pass** (Step 2b below), not three separate trips.
+
 Then compute the windows when they are genuinely free: the gaps between commitments, kept to the next 30 days, at
 least 30 minutes long, no longer than 8 hours each, at most 20 of them. Round to the half hour. Use their own time
 zone.
@@ -101,6 +105,34 @@ matcher compares most sharply — prefer them when they fit:
 board_games, video_games, chess, painting, drawing, photography, pottery, guitar, piano, singing, live_music, edm,
 techno, rock, jazz, coffee, baking, cooking, language_exchange, debate, anime, cinema, volunteering`
 
+### Step 2b — Public events and how busy the fortnight is
+
+In the same pass, collect two more things. Both are optional: if the inbox or Canvas is not connected, skip that part and
+say so (see Replies).
+
+**Public events.** Search the student's inbox for the **last 30 days** for messages about things they could go to:
+career fairs, club meetings, talks, concerts, shows, hackathons, volunteering. Search for those; do not read the whole
+inbox. An email that mentions an event does not mean it is on their calendar, and that is fine: send it either way, once
+the student has approved it. Calendar events that have a public page count the same way. For each event keep exactly
+these five things and nothing else:
+
+- `url`: the link to the event's **public page**. If the email only has a personal link (an RSVP, ticket, invite or
+  "view in browser" link), search the web for the event's public page and use that. If you cannot find one, **drop the
+  event**. Never send a link with a `?` part, an unsubscribe or RSVP link, or a link with a personal code in it.
+- `start` and `end`: local wall time like `2026-10-30T10:00`, plus `tz` (an IANA zone). In the next 30 days, at most 24
+  hours long, not already over.
+- `category`: one of `career, club, talk, music, sports, arts, food, party, volunteer, other`.
+
+Never include: interviews, appointments, receipts, bills, anything one-to-one, anything from a person rather than an
+organisation, or anything about health, money, immigration, legal matters, religion or politics. When unsure, leave it
+out. No title, no sender, no location, no description, no email text. At most 10 events; if there are more, keep the
+ones closest to the student's interests.
+
+**How busy.** One whole number, `busy_load`, for the next 14 days from Canvas deadlines and how full the calendar is:
+`0` light (at most one deadline and plenty of open time), `1` normal, `2` busy (several deadlines or a packed week),
+`3` heavy (exam week, or deadlines stacked on the same days). Canvas shows what it last synced, which can be a little
+out of date; that is fine for a rough number. Never say which course or which assignment.
+
 ### Step 3 — Ask, with the exact words that will be sent
 
 Build the payload file (see `payload.example.json` for the shape, and the server contract for the fields), then show
@@ -115,6 +147,8 @@ Ready to share this with the matcher? Here's exactly what leaves your phone and 
 - free Thu 7-9 pm
 - free Sun 10 am-12 pm
 - into climbing, live music, coffee (you said matcha — that counts as coffee)
+- an event you could go to: career, Fri Oct 30, 10 am-2 pm, careers.asu.example.edu/fall-fair
+- a busy score of 2 out of 3 for the next two weeks (just the number)
 - your card shows your first name, Maya
 
 Reply "yes, send it" and I'll send it now. Or say what to change.
@@ -127,7 +161,14 @@ Rules for that message:
   nickname, not your name" instead and send `"tier": "card"`.
 - Do not soften it into "want me to look for people?" — that is a different question. This is the one moment where
   consent for what leaves the phone is given.
+- List every event as its category, its day and time, and its **full link**, one per line. The link is what leaves the
+  phone, so the student must see it. If they strike an event, remove it and ask again. Someone only ever sees an
+  event if they sent the same link: tell them "a match only sees it if they have it too".
 - Anything the student has not agreed to is not in the payload and not described.
+
+**`events_confirmed_at` is the same moment, for the event list.** Send it whenever `events` is not empty, with the same
+UTC instant as `student_confirmed_at`. If the student removes every event, leave `events` and `events_confirmed_at` out.
+Leave `busy_load` out if you could not work it out.
 
 **`student_confirmed_at` is the moment they say yes.** Its value is that instant in UTC (for example
 `2026-10-24T09:10:00Z`), not the time you read the calendar and not a placeholder. It records that the student saw the
@@ -153,6 +194,10 @@ picked up something new; `changed: false` means nothing differed from last time.
 ```text
 sent. I'll text you when someone's evening lines up with yours.
 ```
+
+The reply also lists `events.stored`: the links the server kept. Tell the student, in one line, which ones, and that
+each is only ever shown to a match who sent the same link. Every post replaces the last, so an event left out next time
+is gone from the server.
 
 If the server rejects the payload (`error: payload_forbidden`), it prints which key was wrong. Fix the payload — never
 by adding a field, always by removing the offending one — and ask the student again if the windows changed.
@@ -251,6 +296,9 @@ Failure cases, one line each:
   promise it is instant.
 - Calendar not connected: "I can't see your calendar yet. Connect it and I'll find your free evenings — or tell me
   which evenings are free."
+- Inbox not connected: skip events and say so once: "I can't see your email, so I'll match on free time and interests
+  only." Never guess events from memory.
+- No public events found: send none and say nothing about it. An empty list is a normal result.
 - Canvas not connected: skip the deadline pass and say so once: "I can't see Canvas, so I'm assuming those evenings
   are really free."
 - Server down (`cannot reach ...`): "the matcher's server isn't answering. I'll try again later — your calendar
