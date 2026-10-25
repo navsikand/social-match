@@ -157,8 +157,14 @@ upsert `availability` (`payload_hash`=sha256 canonical json, `observed_at=now`, 
 `matching.generate_for_user(conn, user_id)` (no router): after a state write, find all OTHER users with live
 availability (expiry read-checked), not blocked (blocks table, both directions via hashed ids), no existing
 non-void/hidden candidate for the unordered pair (`user_a < user_b` store ordered), no swipes row for the pair.
-Score = `3*shared_tags + 2*overlap_hours + 1*(both want event)`; `reasons_json = {"shared_tags": [...],
-"overlap_hours": N, "both_want_event": bool}`. Needs at least one overlap window ≥30 minutes; pick the longest
+Score = `interest_points + 2*overlap_hours + 1*(both want event)` (+4 per shared public event, see §5);
+`reasons_json = {"shared_tags": [...], "overlap_hours": N, "both_want_event": bool}` plus `related` (same-domain
+tag pairs) and `shared_events` when present. `interest_points` comes from `server/taxonomy.py`: tag similarity is
+1.0 for the same tag, 0.5 for the same domain, 0.2 for compatible domains, else 0; each tag takes its best match on
+the other side (max, never a cross-product), weighted by rarity (`2*ln((N+1)/(n+1))/ln(N+1)`, bounded to
+[0.5, 2.0], and exactly 1.0 while fewer than 8 users are live), averaged over both directions, ×3, capped at 9.
+`SIMILARITY_FLOOR` (default 0) can require a best-pair similarity before any card exists. `shared_tags` stays the
+exact intersection, because the activity offer needs a tag both students really have. Needs at least one overlap window ≥30 minutes; pick the longest
 such intersection and create `candidates(state='open', expires_at=min both expires_at)` plus proposal
 `version=1, state='proposed', window_start/end=the intersection, expires_at=candidate.expires_at`. Push inbox
 items to BOTH users (kind `candidate`) via `db.push_inbox` with payload composed through `server/wording.py`
@@ -386,5 +392,8 @@ prevention, E2E email, moderation UI. Deferred items stay absent from code, not 
   (`events_confirmed_at`, provenance not proof). The server validates the link's shape, drops the `?query`, never opens it,
   and cannot tell a public page from one with a personal code in its path. A match sees an event only if both students
   sent the same page. `busy_load` is one agent-computed number the server cannot verify.
+- Interest similarity (`server/taxonomy.py`): the domains and the compatible-domain pairs are our own assumptions, and
+  the rarity weights come from the few live users, so they are noisy and are exactly 1.0 until 8 users are live. The
+  score is a fixed formula, not a trained model, and it never overrides consent, blocks or the 30-minute overlap.
 - The server accepts allowlisted payloads AND REJECTS everything else with 422; we do NOT claim trusted Skill code
   cannot send data elsewhere.

@@ -35,6 +35,12 @@ def _bool_env(name: str, default: bool = False) -> bool:
     return value.lower() in ("1", "true", "yes", "on")
 
 
+def similarity_floor() -> float:
+    """Minimum best-pair similarity for a card to exist at all. 0 (default) keeps the old behaviour
+    where time alone makes a card; 0.5 means the two students must share at least a domain."""
+    return max(0.0, min(1.0, _float_env("SIMILARITY_FLOOR", 0.0)))
+
+
 def db_path() -> str:
     return os.environ.get("SOCIAL_MATCH_DB", _DB_DEFAULT)
 

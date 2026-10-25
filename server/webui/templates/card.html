@@ -151,6 +151,11 @@
     if (reasons.shared_tags && reasons.shared_tags.length) {
       parts.push("Shared interests: " + reasons.shared_tags.join(", "));
     }
+    if (reasons.related && reasons.related.length) {
+      parts.push("Related interests: " + reasons.related.map(
+        (r) => (r.tags || []).join(" ~ ") + " (" + String(r.domain || "").replace(/_/g, " ") + ")"
+      ).join("; "));
+    }
     if (reasons.overlap_hours) parts.push(reasons.overlap_hours + "h of shared free time");
     if (reasons.both_want_event) parts.push("You both want to go to something");
     const reasonsEl = document.getElementById("reasons");

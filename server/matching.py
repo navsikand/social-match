@@ -8,7 +8,9 @@ there and abort the whole state write.
 The payload's `wants` values (hangout|event) persist in `user_wants` (schema.sql):
 `both_want_event` is true when BOTH users carry the `event` want — a real stored
 signal, not a tag heuristic. The reasons key stays `both_want_event`, and the
-score formula is 3*shared_tags + 2*overlap_hours + 1*both_want_event, plus 4 for each public
+score is interest_points + 2*overlap_hours + 1*both_want_event, where interest_points comes from
+server/taxonomy.py (exact tag 1.0, same domain 0.5, compatible domain 0.2, best match per tag,
+rarity-weighted, 3 points per exact tag, capped at 9), plus 4 for each public
 event link both students sent (user_events). `busy_load` is stored for the ranker but this
 rule baseline deliberately ignores it, so a learned model can be compared against it.
 """
@@ -16,7 +18,8 @@ import collections
 import datetime
 import json
 
-from server import db, logging as smlog, wording
+from server import config, db, taxonomy, wording
+from server import logging as smlog
 
 log = smlog.get("match")
 
@@ -114,6 +117,28 @@ def refresh_events(conn, user_id: int) -> int:
     return changed
 
 
+def _tag_weights(conn, now: str) -> dict[str, float]:
+    """Rarity weight per tag, from the users who currently have live availability.
+
+    Cold start (fewer than taxonomy.MIN_USERS_FOR_WEIGHTS live users) returns {} so every tag
+    weighs exactly 1.0 and scores are the old, predictable numbers.
+    """
+    live = conn.execute(
+        "SELECT COUNT(*) AS n FROM availability WHERE expires_at > ?", (now,)
+    ).fetchone()["n"]
+    if live < taxonomy.MIN_USERS_FOR_WEIGHTS:
+        return {}
+    return {
+        row["tag"]: taxonomy.weight(row["n"], live)
+        for row in conn.execute(
+            "SELECT h.tag AS tag, COUNT(*) AS n FROM hobby_tags h"
+            " JOIN availability a ON a.user_id = h.user_id AND a.expires_at > ?"
+            " GROUP BY h.tag",
+            (now,),
+        ).fetchall()
+    }
+
+
 def _longest_overlap(mine, theirs):
     """Longest >=30min intersection across every pair of window rows.
 
@@ -192,6 +217,8 @@ def generate_for_user(conn, user_id: int) -> list[int]:
     my_tags = _tags(conn, user_id)
     my_wants = _wants(conn, user_id)
     my_events = _events(conn, user_id, now)
+    weights = _tag_weights(conn, now)
+    floor = config.similarity_floor()
 
     others = conn.execute(
         "SELECT user_id, expires_at FROM availability WHERE user_id != ? AND expires_at > ?"
@@ -255,14 +282,19 @@ def generate_for_user(conn, user_id: int) -> list[int]:
         their_tags = _tags(conn, other_id)
         their_wants = _wants(conn, other_id)
         shared = sorted(my_tags & their_tags)
+        if floor > 0 and taxonomy.max_similarity(my_tags, their_tags) < floor:
+            skip("below_similarity_floor", other_id)  # SIMILARITY_FLOOR: time alone is not enough
+            continue
+        related = taxonomy.related_pairs(my_tags, their_tags)
         overlap_hours = int(round(seg_seconds / 3600))
         both_want_event = "event" in my_wants and "event" in their_wants
         # A link both students sent is the same public event: the strongest single signal.
         # Only the intersection is ever shown; either side's other events stay private.
         their_events = _events(conn, other_id, now)
         shared_events = _shared_events(my_events, their_events)
+        interest_points = int(taxonomy.tag_points(my_tags, their_tags, weights) + 0.5)
         score = (
-            3 * len(shared)
+            interest_points
             + 2 * overlap_hours
             + (1 if both_want_event else 0)
             + SHARED_EVENT_WEIGHT * len(shared_events)
@@ -274,6 +306,8 @@ def generate_for_user(conn, user_id: int) -> list[int]:
             "overlap_hours": overlap_hours,
             "both_want_event": both_want_event,
         }
+        if related:
+            reasons["related"] = related
         if shared_events:
             reasons["shared_events"] = shared_events
         conn.execute(
