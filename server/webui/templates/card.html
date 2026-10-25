@@ -78,7 +78,7 @@
   let busy = false;
 
   const errors = {
-    404: "This card isn't available any more (expired, withdrawn, or already handled).",
+    404: "This card isn't open any more — it may already be a confirmed match (check Matches), or it expired.",
     401: "Your session expired — sign in again.",
     403: "You can't act on this card.",
     409: "That action conflicts with a newer version of this card. Reload to see it.",
@@ -188,6 +188,12 @@
     }
     statusEl.hidden = true;
     cardEl.hidden = false;
+    // Already settled? A confirmed plan is not an open card: say so and retire the buttons,
+    // instead of letting a stray click fall through to a dead-end 404.
+    if (data.state === "matched") {
+      show(message, "You're already matched — this is a confirmed plan. See Matches.", "ok");
+      for (const b of cardEl.querySelectorAll("button")) b.hidden = true;
+    }
   }
 
   // Option B: the activity is a tag + a link, nothing else. Everything goes in via textContent,

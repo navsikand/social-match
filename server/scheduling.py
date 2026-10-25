@@ -200,6 +200,13 @@ def _window_date(start_utc: str, tz: str) -> str:
     return f"{local.day} {local.strftime('%b')}"
 
 
+def _display_name(conn, uid: int) -> str:
+    """Owner's call: real names, with the pseudonym only as a last-resort fallback."""
+    row = db.one(conn, "SELECT display_name FROM users WHERE id=?", (uid,))
+    name = row["display_name"] if row is not None else None
+    return name or wording.label(conn, uid)
+
+
 def matches(conn, uid: int) -> dict:
     """Confirmed plans the viewer may still see (CONTRACT-photos.md §3).
 
@@ -245,7 +252,8 @@ def matches(conn, uid: int) -> dict:
         )
         item = {
             "candidate_id": cand["id"],
-            "about": wording.label(conn, about_uid),
+            # Owner's call: real names everywhere a matched pair sees each other.
+            "about": _display_name(conn, about_uid),
             "window": {
                 "start_utc": start,
                 "end_utc": end,

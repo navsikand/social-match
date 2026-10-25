@@ -78,9 +78,9 @@ def test_two_sided_confirm_appears_for_both_users_with_own_label(seeded, client)
     assert [m["candidate_id"] for m in a_view] == [cid]
     assert [m["candidate_id"] for m in b_view] == [cid]
 
-    # `about` is always the counterpart, labelled for the viewer.
-    # B only has a `card` grant, so A sees B's pseudonym — never the display name.
-    assert a_view[0]["about"] != "Bea"
+    # `about` is always the counterpart. Owner's call: the real name is shown regardless of
+    # the publication tier, so both sides read a name.
+    assert a_view[0]["about"] == "Bea"
     assert b_view[0]["about"] == "Ava"
     assert a_view[0]["state"] == "matched"
     assert a_view[0]["historical"] is False
@@ -90,14 +90,12 @@ def test_two_sided_confirm_appears_for_both_users_with_own_label(seeded, client)
     assert a_view[0]["confirmed_at"]
 
 
-def test_pseudonym_used_when_name_not_published(seeded, client):
+def test_real_name_is_always_used_on_matches(seeded, client):
+    """Owner's call, superseding the tier-gated label: a confirmed plan shows the real name."""
     a, b, cid, pid = _pair()
     _confirmed(cid, pid, a, b)
     row = _rows(client, a)[0]
-    import hashlib
-
-    assert row["about"] == f"climbing-{hashlib.sha256(f'pseudo:{b}'.encode()).hexdigest()[:4]}"
-    assert row["about"] != "Bea"
+    assert row["about"] == "Bea"
 
 
 # ------------------------------------------------------------------ never listed
