@@ -1,0 +1,808 @@
+"""server/chat.py — the turn engine, the action protocol, the pending store, the endpoints.
+
+The provider seam is server.ai.stream_reply, monkeypatched everywhere below with async
+generator fixtures (CONTRACT-chat.md §2); zero network, zero sleeps, frozen clock.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient  # pyright: ignore[reportMissingImports]
+
+from server import activity, chat, config, db
+from server.scheduling import SchedulingError
+from server.schema import MAX_WINDOWS
+from tests import util
+
+FIXED_NOW = "2026-10-24T12:00:00Z"
+TZ = "America/Los_Angeles"
+WINDOW_OK = {"start": "2026-10-29T19:00:00", "end": "2026-10-29T21:00:00", "tz": TZ}
+
+
+@pytest.fixture(autouse=True)
+def frozen_clock(monkeypatch):
+    monkeypatch.setattr(db, "_FIXED_NOW", FIXED_NOW)
+    yield
+    db._FIXED_NOW = None
+
+
+# ------------------------------------------------------------------ scripted provider
+
+
+def scripted(text: str):
+    """A stream_reply stand-in yielding `text` in three chunks."""
+    third = max(1, len(text) // 3)
+    pieces = [text[:third], text[third : 2 * third], text[2 * third :]]
+
+    async def fake(system, messages, *, transport=None):
+        for piece in pieces:
+            yield piece
+
+    return fake
+
+
+def reply_with_fence(actions: dict | list | None = None, prose: str = "Sure."):
+    body = json.dumps({"actions": actions if actions is not None else []})
+    return scripted(f"{prose}\n```json\n{body}\n```\n")
+
+
+def neg_reply(ops, prose: str = "Looking at the offer."):
+    if isinstance(ops, dict):
+        ops = [ops]
+    return scripted(f"{prose} SECRET-PROSE-7\n```json\n{json.dumps({'actions': ops})}\n```\n")
+
+def events_of(response) -> list[dict]:
+    out = []
+    for line in response.text.splitlines():
+        if line.startswith("data: "):
+            out.append(json.loads(line[len("data: ") :]))
+    return out
+
+
+def last_event(response, kind: str):
+    found = [e for e in events_of(response) if e["type"] == kind]
+    assert found, f"no {kind} event in stream: {response.text[:400]}"
+    return found[-1]
+
+
+@pytest.fixture(autouse=True)
+def ai_configured(monkeypatch):
+    """Every streaming test needs a configured provider; 503 has its own test."""
+    monkeypatch.setattr(config, "ai_api_url", lambda: "https://provider.example/v1/chat/completions")
+    monkeypatch.setattr(config, "api_key_unused", lambda: None, raising=False)
+    yield
+
+
+# ------------------------------------------------------------------ section: endpoints hardening
+
+
+def _register(client, email="ch@x.test", name="Chip"):
+    r = client.post(
+        "/api/register",
+        json={
+            "email": email,
+            "password": "pw-123456",
+            "display_name": name,
+            "avatar_id": 2,
+            "adult_attested": True,
+            "registration_code": "testiva",
+        },
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["user_id"]
+
+
+def test_history_shape_and_ordering(client):
+    uid = _register(client)
+    conn = db.connect()
+    try:
+        chat.persist_user_message(conn, uid, "first")
+        chat.persist_note(conn, uid, "a note in the middle")
+        chat.persist_final_assistant(conn, uid, "second")
+    finally:
+        conn.close()
+
+    chat_rows = client.get("/api/chat/history")
+    assert chat_rows.status_code == 200
+    body = chat_rows.json()
+    roles = [m["role"] for m in body["messages"]]
+    assert roles == ["user", "note", "assistant"]
+    assert set(body["state"]) == {
+        "windows", "interests", "wants", "busy", "events", "delegation", "matching", "ai",
+    }
+    assert body["pending"] is None
+    assert body["state"]["ai"] is True  # the autouse fixture configures the provider
+
+
+def test_unconfigured_returns_503(client, monkeypatch):
+    monkeypatch.setattr(config, "ai_api_url", lambda: None)
+    _register(client)
+    r = client.post("/api/chat", json={"content": "hello"}, headers={"Content-Type": "application/json"})
+    assert r.status_code == 503
+    assert r.json()["error"] == "ai_unconfigured"
+
+
+def test_content_type_and_body_caps(client):
+    _register(client)
+    r = client.post("/api/chat", content=b"{}", headers={"Content-Type": "text/plain"})
+    assert r.status_code == 422
+
+    big = json.dumps({"content": "x" * 70_000}).encode()
+    r = client.post("/api/chat", content=big, headers={"Content-Type": "application/json"})
+    assert r.status_code == 413
+    assert r.json()["error"] == "too_large"
+
+    r = client.post("/api/chat", json={"content": "x" * 4001})
+    assert r.status_code == 422
+    r = client.post("/api/chat", json={"content": ""})
+    assert r.status_code == 200 and r.text  # empty string is fine as a turn
+    r = client.post("/api/chat", json={"content": "x", "extra": 1})
+    assert r.status_code == 422
+
+
+def test_cross_origin_refused(client, monkeypatch):
+    monkeypatch.setattr(config, "base_url", lambda: "http://testserver")
+    _register(client)
+    r = client.post(
+        "/api/chat",
+        json={"content": "hello"},
+        headers={"Origin": "https://evil.example"},
+    )
+    assert r.status_code == 403
+    assert r.json()["error"] == "origin_forbidden"
+    # Same-origin passes the check (and then streams; ai stub raises — handled as SSE error).
+    ok = client.post("/api/chat", json={"content": "hello"}, headers={"Origin": "http://testserver"})
+    assert ok.status_code == 200
+
+
+def test_rate_limit_twenty_per_ten_minutes(client):
+    uid = _register(client)
+    conn = db.connect()
+    try:
+        with db.immediate(conn):
+            for _ in range(20):
+                conn.execute(
+                    "INSERT INTO chat_turns (user_id, kind, ref, at) VALUES (?,?,?,?)",
+                    (uid, "chat", None, db.utcnow()),
+                )
+    finally:
+        conn.close()
+    r = client.post("/api/chat", json={"content": "hi"})
+    assert r.status_code == 429
+    assert r.json()["error"] == "rate_limited"
+
+
+def test_turn_busy_conflict(client):
+    uid = _register(client)
+    lock = chat.get_user_lock(uid)
+    asyncio.run(lock.acquire())  # a bare acquire() in sync context is an unawaited coroutine
+    try:
+        r = client.post("/api/chat", json={"content": "hi"})
+        assert r.status_code == 409
+        assert r.json()["error"] == "turn_busy"
+    finally:
+        lock.release()
+
+# ------------------------------------------------------------------ section: action protocol
+
+
+def test_plain_conversation_persists_nothing_else(client, monkeypatch):
+    uid = _register(client)
+    monkeypatch.setattr(chat.ai, "stream_reply", scripted("Just chatting, no actions here."))
+
+    r = client.post("/api/chat", json={"content": "tell me a joke"})
+    assert r.status_code == 200
+    ev = events_of(r)
+    assert any(e["type"] == "token" for e in ev)
+    note = last_event(r, "note")
+    assert note["text"].startswith("Just chatting")
+    assert last_event(r, "done")["type"] == "done"
+
+    conn = db.connect()
+    try:
+        rows = db.q(conn, "SELECT role, content FROM chat_messages WHERE user_id=?", (uid,))
+        assert [x["role"] for x in rows] == ["user", "assistant"]
+        assert db.one(conn, "SELECT COUNT(*) AS n FROM availability_windows")["n"] == 0
+    finally:
+        conn.close()
+
+
+def test_multiple_fences_apply_nothing(client, monkeypatch):
+    uid = _register(client)
+    double = "```json\n{\"actions\": [{\"op\": \"none\"}]}\n```\nagain\n```json\n{\"actions\": []}\n```\n"
+    monkeypatch.setattr(chat.ai, "stream_reply", scripted(double))
+
+    r = client.post("/api/chat", json={"content": "do two things"})
+    note = last_event(r, "note")
+    assert "multiple action blocks" in note["text"]
+    conn = db.connect()
+    try:
+        assert db.one(conn, "SELECT COUNT(*) AS n FROM chat_pending")["n"] == 0
+    finally:
+        conn.close()
+
+
+def test_fence_not_last_applies_nothing(client, monkeypatch):
+    uid = _register(client)
+    text = "```json\n{\"actions\": []}\n```\nbut then I kept talking."
+    monkeypatch.setattr(chat.ai, "stream_reply", scripted(text))
+    r = client.post("/api/chat", json={"content": "hi"})
+    assert "last in the reply" in last_event(r, "note")["text"]
+
+
+def test_bad_json_fence_is_refused(client, monkeypatch):
+    uid = _register(client)
+    monkeypatch.setattr(chat.ai, "stream_reply", scripted("x\n```json\n{not json\n```\n"))
+    r = client.post("/api/chat", json={"content": "hi"})
+    assert "couldn't read the action block" in last_event(r, "note")["text"]
+
+
+@pytest.mark.parametrize(
+    "actions, fragment",
+    [
+        ([{"op": "delete_everything"}], "unknown op"),
+        ([{"op": "set_busy_load", "value": 2, "evil": 1}], "wrong fields"),
+        ([{"op": "set_wants", "wants": ["hangout"]}, {"op": "set_wants", "wants": ["event"]}], "same field"),
+        ([{"op": "set_busy_load", "value": 9}], "busy load"),
+        ([{"op": "none"}, {"op": "set_wants", "wants": ["hangout"]}], "can't be combined"),
+    ],
+)
+def test_batch_level_rejections(client, monkeypatch, actions, fragment):
+    _register(client)
+    monkeypatch.setattr(chat.ai, "stream_reply", reply_with_fence(actions))
+    r = client.post("/api/chat", json={"content": "do it"})
+    assert fragment in last_event(r, "note")["text"]
+
+
+def test_immediate_apply_canonicalises_and_never_touches_grants(client, monkeypatch):
+    uid = _register(client)
+    before = _grants_dump(uid)
+
+    monkeypatch.setattr(chat.ai, "stream_reply", reply_with_fence([{"op": "set_interests", "tags": ["matcha"]}]))
+    r = client.post("/api/chat", json={"content": "matcha is my interest"})
+    applied = last_event(r, "actions")
+    assert applied["applied"][0]["op"] == "set_interests"
+    assert last_event(r, "state")["state"]["interests"] == ["matcha"]
+
+    conn = db.connect()
+    try:
+        tags = [x["tag"] for x in db.q(conn, "SELECT tag FROM hobby_tags WHERE user_id=?", (uid,))]
+        assert "coffee" in tags  # matcha → coffee, canonicalised in the matcher's vocabulary
+        rows = db.q(
+            conn, "SELECT action, scope FROM consent_log WHERE user_id_hash=?", (db.user_hash(uid),)
+        )
+        assert [x["action"] for x in rows].count("state:written") == 1
+        assert all(x["scope"] != "matching" for x in rows)
+    finally:
+        conn.close()
+    assert _grants_dump(uid) == before
+
+
+def test_immediate_apply_wants_and_busy_reject_out_of_vocab(client, monkeypatch):
+    _register(client)
+    monkeypatch.setattr(chat.ai, "stream_reply", reply_with_fence([{"op": "set_wants", "wants": ["hangout"]}]))
+    r = client.post("/api/chat", json={"content": "hangouts only"})
+    assert last_event(r, "actions")["applied"][0]["op"] == "set_wants"
+
+    bad = client.post("/api/chat", json={"content": "again"})
+    monkeypatch.setattr(chat.ai, "stream_reply", reply_with_fence([{"op": "set_wants", "wants": ["party"]}]))
+    bad = client.post("/api/chat", json={"content": "again"})
+    # set_wants accepts any list of strings at validation; StatePayload enforces the vocabulary.
+    kinds = [e["type"] for e in events_of(bad)]
+    assert "conflict" in kinds or "note" in kinds  # refused, never silently accepted
+
+
+def _grants_dump(uid: int) -> list[tuple]:
+    conn = db.connect()
+    try:
+        return [
+            tuple(r)
+            for r in conn.execute(
+                "SELECT user_id, kind, tier, version, fields_json, audience, granted_at,"
+                " expires_at, withdrawn_at FROM grants WHERE user_id=? ORDER BY kind, version",
+                (uid,),
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+# ------------------------------------------------------------------ section: pending previews
+
+
+def test_windows_become_a_preview_not_a_write(client, monkeypatch):
+    uid = _register(client)
+    monkeypatch.setattr(
+        chat.ai,
+        "stream_reply",
+        reply_with_fence([{"op": "set_windows", "windows": [WINDOW_OK]}]),
+    )
+    r = client.post("/api/chat", json={"content": "I'm free Thursday evening"})
+    preview = last_event(r, "preview")
+    assert preview["kind"] == "windows"
+    assert preview["items"][0]["tz"] == TZ
+
+    conn = db.connect()
+    try:
+        assert db.one(conn, "SELECT COUNT(*) AS n FROM availability_windows WHERE user_id=?", (uid,))["n"] == 0
+        row = db.one(conn, "SELECT * FROM chat_pending WHERE user_id=?", (uid,))
+        assert row is not None and row["kind"] == "windows"
+    finally:
+        conn.close()
+
+    hist = client.get("/api/chat/history").json()
+    assert hist["pending"]["id"] == preview["id"]
+
+
+def test_confirm_applies_windows_and_riders_atomically(client, monkeypatch):
+    uid = _register(client)
+    monkeypatch.setattr(
+        chat.ai,
+        "stream_reply",
+        reply_with_fence(
+            [
+                {"op": "set_windows", "windows": [WINDOW_OK]},
+                {"op": "set_interests", "tags": ["matcha"]},
+            ]
+        ),
+    )
+    r = client.post("/api/chat", json={"content": "free Thursday and I like matcha"})
+    pending_id = last_event(r, "preview")["id"]
+
+    conn = db.connect()
+    try:
+        # RIDERS: strictly nothing applies before the Confirm — the whole batch defers.
+        assert db.one(conn, "SELECT COUNT(*) AS n FROM hobby_tags WHERE user_id=?", (uid,))["n"] == 0
+        assert db.one(conn, "SELECT COUNT(*) AS n FROM availability_windows WHERE user_id=?", (uid,))["n"] == 0
+    finally:
+        conn.close()
+
+    ok = client.post("/api/chat/confirm", json={"id": pending_id})
+    assert ok.status_code == 200, ok.text
+    ops = sorted(c["op"] for c in ok.json()["confirmations"])
+    assert ops == ["set_interests", "set_windows"]
+
+    conn = db.connect()
+    try:
+        wins = db.q(conn, "SELECT starts_at, ends_at, tz FROM availability_windows WHERE user_id=?", (uid,))
+        assert len(wins) == 1 and wins[0]["tz"] == TZ
+        tags = [x["tag"] for x in db.q(conn, "SELECT tag FROM hobby_tags WHERE user_id=?", (uid,))]
+        assert tags == ["coffee"]
+    finally:
+        conn.close()
+
+
+def test_confirm_conflict_when_state_changed(client, monkeypatch):
+    uid = _register(client)
+    monkeypatch.setattr(
+        chat.ai,
+        "stream_reply",
+        reply_with_fence([{"op": "set_windows", "windows": [WINDOW_OK]}]),
+    )
+    r = client.post("/api/chat", json={"content": "free Thursday"})
+    pending_id = last_event(r, "preview")["id"]
+
+    # A second writer changes state between preview and confirm. The payload hash covers
+    # the RAW interest words (interest_raw), not the canonical hobby_tags table.
+    conn = db.connect()
+    try:
+        with db.immediate(conn):
+            conn.execute(
+                "INSERT OR REPLACE INTO interest_raw (user_id, raw, canonical) VALUES (?,?,?)",
+                (uid, "bouldering", "bouldering"),
+            )
+    finally:
+        conn.close()
+    conflict = client.post("/api/chat/confirm", json={"id": pending_id})
+    assert conflict.status_code == 409
+    assert conflict.json()["error"] == "conflict"
+    # The pending row survives a conflict so the student can re-ask; cancel clears it.
+    cancel = client.post("/api/chat/confirm", json={"id": pending_id, "cancel": True})
+    assert cancel.json() == {"ok": True, "cancelled": True}
+
+
+def test_confirm_expired_preview(client, monkeypatch):
+    uid = _register(client)
+    monkeypatch.setattr(
+        chat.ai,
+        "stream_reply",
+        reply_with_fence([{"op": "set_windows", "windows": [WINDOW_OK]}]),
+    )
+    r = client.post("/api/chat", json={"content": "free"})
+    pending_id = last_event(r, "preview")["id"]
+
+    db._FIXED_NOW = "2026-10-24T12:30:00Z"  # 30 min later: past the 10-minute TTL
+    expired = client.post("/api/chat/confirm", json={"id": pending_id})
+    assert expired.status_code == 409
+    assert expired.json()["error"] == "expired"
+
+
+def test_second_proposal_supersedes_the_first(client, monkeypatch):
+    uid = _register(client)
+    monkeypatch.setattr(
+        chat.ai, "stream_reply", reply_with_fence([{"op": "set_windows", "windows": [WINDOW_OK]}])
+    )
+    first = client.post("/api/chat", json={"content": "one"}).text
+    monkeypatch.setattr(
+        chat.ai,
+        "stream_reply",
+        reply_with_fence(
+            [
+                {
+                    "op": "set_windows",
+                    "windows": [dict(WINDOW_OK, start="2026-10-28T18:00:00", end="2026-10-28T20:00:00")],
+                }
+            ]
+        ),
+    )
+    second = client.post("/api/chat", json={"content": "two"}).text
+
+    conn = db.connect()
+    try:
+        rows = db.q(conn, "SELECT id FROM chat_pending WHERE user_id=?", (uid,))
+        assert len(rows) == 1
+        ids = [
+            json.loads(line[len("data: ") :])["id"]
+            for text in (first, second)
+            for line in text.splitlines()
+            if line.startswith("data: ") and '"preview"' in line
+        ]
+        assert len(ids) == 2  # two previews emitted server-side, one row kept
+    finally:
+        conn.close()
+
+
+def test_invalid_window_in_proposal_is_refused(client, monkeypatch):
+    _register(client)
+    bad_window = dict(WINDOW_OK, start="2026-10-29T22:00:00", end="2026-10-29T19:00:00")
+    monkeypatch.setattr(
+        chat.ai, "stream_reply", reply_with_fence([{"op": "set_windows", "windows": [bad_window]}])
+    )
+    r = client.post("/api/chat", json={"content": "free"})
+    note = last_event(r, "note")
+    assert "couldn't use that as-is" in note["text"]
+    conn = db.connect()
+    try:
+        assert db.one(conn, "SELECT COUNT(*) AS n FROM chat_pending")["n"] == 0
+    finally:
+        conn.close()
+
+
+# ------------------------------------------------------------------ section: negotiation turns
+
+
+def _pair():
+    a = util.mk_user("na@x.test", "Ash")
+    b = util.mk_user("nb@x.test", "Bree")
+    util.pub_card(a)
+    util.pub_card(b)
+    cid, pid = util.mk_candidate(a, b)
+    # activity.propose requires the tag to be an interest BOTH sides share.
+    util.tags(a, ["coffee"])
+    util.tags(b, ["coffee"])
+    return a, b, cid, pid
+
+def _delegation_on(uid: int):
+    conn = db.connect()
+    try:
+        with db.immediate(conn):
+            conn.execute(
+                "INSERT INTO grants (user_id, kind, version, audience, granted_at, expires_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (uid, "delegation", 1, "matched_users_only", db.utcnow(), db.utcnow(days=30)),
+            )
+    finally:
+        conn.close()
+
+
+def _act(uid: int, turn: chat.Turn) -> list[dict]:
+    conn = db.connect()
+    try:
+        async def drain():
+            return [e async for e in chat.run_turn(conn, uid, turn)]
+
+        return asyncio.run(drain())
+    finally:
+        conn.close()
+
+
+def test_negotiation_turn_offers_and_partitions_transcripts(client, monkeypatch):
+    a, b, cid, pid = _pair()
+    _delegation_on(a)
+    conn = db.connect()
+    try:
+        prop = db.one(conn, "SELECT * FROM proposals WHERE id=?", (pid,))
+    finally:
+        conn.close()
+
+    op = {
+        "op": "offer",
+        "candidate_id": cid,
+        "proposal_version": prop["version"],
+        "tag": "coffee",
+        "url": "https://example.com/cafe",
+    }
+    monkeypatch.setattr(chat.ai, "stream_reply", neg_reply(op))
+    events = _act(a, chat.Turn(kind="negotiation", user_text=None, system_extra="offer context"))
+
+    assert [e["type"] for e in events if e["type"] in ("actions", "note")][-1] == "actions"
+    assert events[-1]["type"] == "done"
+
+    conn = db.connect()
+    try:
+        offer = db.one(conn, "SELECT * FROM activity_offers WHERE candidate_id=? ORDER BY id DESC", (cid,))
+        assert offer is not None and offer["state"] == "offered"
+        mine = [r["content"] for r in db.q(conn, "SELECT content FROM chat_messages WHERE user_id=?", (a,))]
+        theirs = [r["content"] for r in db.q(conn, "SELECT content FROM chat_messages WHERE user_id=?", (b,))]
+        assert any("your assistant proposed" in m for m in mine)
+        assert any("they proposed" in m and "cafe" in m for m in theirs)
+        assert all("SECRET-PROSE-7" not in m for m in theirs), "provider prose leaked to the counterpart"
+        assert any("SECRET-PROSE-7" in m for m in mine), "acting user keeps their assistant's prose"
+    finally:
+        conn.close()
+
+
+def test_negotiation_delegation_off_drops_the_op(client, monkeypatch):
+    a, b, cid, pid = _pair()
+    conn = db.connect()
+    try:
+        prop = db.one(conn, "SELECT * FROM proposals WHERE id=?", (pid,))
+    finally:
+        conn.close()
+    op = {
+        "op": "offer",
+        "candidate_id": cid,
+        "proposal_version": prop["version"],
+        "tag": "coffee",
+        "url": "https://example.com/cafe",
+    }
+    monkeypatch.setattr(chat.ai, "stream_reply", neg_reply(op))
+    events = _act(a, chat.Turn(kind="negotiation", user_text=None, system_extra="ctx"))
+    assert events[-2]["type"] == "note"
+    assert "delegation was off" in events[-2]["text"]
+    conn = db.connect()
+    try:
+        assert db.one(conn, "SELECT COUNT(*) AS n FROM activity_offers WHERE candidate_id=?", (cid,))["n"] == 0
+    finally:
+        conn.close()
+
+
+def test_negotiation_multiple_ops_refused(client, monkeypatch):
+    a, b, cid, pid = _pair()
+    op = {"op": "accept", "offer_id": 1}
+    monkeypatch.setattr(chat.ai, "stream_reply", neg_reply([op, op]))
+    events = _act(a, chat.Turn(kind="negotiation", user_text=None, system_extra="ctx"))
+    assert "more than one negotiation op" in events[-2]["text"]
+
+
+def test_manual_offer_respond_needs_no_delegation(client):
+    a, b, cid, pid = _pair()
+    conn = db.connect()
+    # activity.propose manages its own transaction — never wrap it in another.
+    activity.propose(conn, a, cid, 1, "coffee", "https://example.com/cafe")
+    offer_id = db.one(conn, "SELECT id FROM activity_offers WHERE candidate_id=?", (cid,))["id"]
+    conn.close()
+
+    util.direct_session(client, b)  # B, delegation OFF, answers by hand
+    r = client.post(
+        "/api/chat/offer-respond",
+        json={"action": "accept", "candidate_id": cid, "offer_id": offer_id},
+    )
+    assert r.status_code == 200, r.text
+
+    conn = db.connect()
+    try:
+        theirs = [r2["content"] for r2 in db.q(conn, "SELECT content FROM chat_messages WHERE user_id=?", (a,))]
+        assert any("they accepted" in m for m in theirs)
+    finally:
+        conn.close()
+
+
+# ------------------------------------------------------------------ section: consent atomicity
+# Gate review P1 #1: the delegation check must live INSIDE the activity core's write
+# transaction. These tests withdraw the grant after the core's authorization reads and before
+# its first write, which is exactly the window the pre-flight check cannot cover.
+
+
+def _withdraw_after_authorization(monkeypatch, uid: int) -> None:
+    """Race the core: the grant dies between its `_guard` reads and its writes (same txn)."""
+    real = activity._guard
+
+    def racing_guard(conn, guarded_uid, candidate_id, now):
+        out = real(conn, guarded_uid, candidate_id, now)
+        conn.execute(
+            "UPDATE grants SET withdrawn_at=? WHERE user_id=? AND kind='delegation'"
+            " AND withdrawn_at IS NULL",
+            (db.utcnow(), uid),
+        )
+        return out
+
+    monkeypatch.setattr(activity, "_guard", racing_guard)
+
+
+def test_autonomous_core_refuses_when_grant_vanishes_after_authorization(client, monkeypatch):
+    """No chat pre-check involved: the CORE alone must refuse (nothing written)."""
+    a, b, cid, pid = _pair()
+    _delegation_on(a)
+    _withdraw_after_authorization(monkeypatch, a)
+
+    conn = db.connect()
+    try:
+        with pytest.raises(SchedulingError) as caught:
+            activity.propose(
+                conn, a, cid, 1, "coffee", "https://example.com/cafe", autonomous=True
+            )
+        assert (caught.value.status, caught.value.code) == (409, "delegation_required")
+        assert "delegation was off" in caught.value.detail
+        assert db.one(
+            conn, "SELECT COUNT(*) AS n FROM activity_offers WHERE candidate_id=?", (cid,)
+        )["n"] == 0
+    finally:
+        conn.close()
+
+
+def test_manual_core_call_needs_no_delegation(client, monkeypatch):
+    """The same core without `autonomous=True`: a human click is the consent."""
+    a, b, cid, pid = _pair()
+    _withdraw_after_authorization(monkeypatch, a)  # no grant to withdraw: must not matter
+    conn = db.connect()
+    try:
+        out = activity.propose(conn, a, cid, 1, "coffee", "https://example.com/cafe")
+        assert out["state"] == "offered"
+    finally:
+        conn.close()
+
+
+# ------------------------------------------------------------------ section: value validation
+# Gate review P1 #2: an allow-listed KEY is not an allow-listed VALUE. The cores validate.
+
+BAD_VALUES = {
+    "prose_url": ("coffee", "https://example.com/SECRET-PROSE-7 my windows are Sunday"),
+    "prose_tag": ("my windows are Sunday", "https://example.com/cafe"),
+    "javascript_url": ("coffee", "javascript:alert(1)"),
+    "oversized_url": ("coffee", "https://example.com/" + "a" * 400),
+}
+
+
+def _notes_for(conn, uid: int) -> list[str]:
+    return [
+        row["content"]
+        for row in db.q(
+            conn, "SELECT content FROM chat_messages WHERE user_id=? AND role='note'", (uid,)
+        )
+    ]
+
+
+@pytest.mark.parametrize("case", sorted(BAD_VALUES))
+def test_negotiation_op_values_validated_by_the_core(client, monkeypatch, case):
+    tag, url = BAD_VALUES[case]
+    a, b, cid, pid = _pair()
+    _delegation_on(a)
+    conn = db.connect()
+    try:
+        version = db.one(conn, "SELECT version FROM proposals WHERE id=?", (pid,))["version"]
+    finally:
+        conn.close()
+    op = {
+        "op": "offer",
+        "candidate_id": cid,
+        "proposal_version": version,
+        "tag": tag,
+        "url": url,
+    }
+    monkeypatch.setattr(chat.ai, "stream_reply", neg_reply(op))
+
+    events = _act(a, chat.Turn(kind="negotiation", user_text=None, system_extra="ctx"))
+
+    assert events[-2]["type"] == "note"
+    conn = db.connect()
+    try:
+        assert db.one(
+            conn, "SELECT COUNT(*) AS n FROM activity_offers WHERE candidate_id=?", (cid,)
+        )["n"] == 0
+        assert _notes_for(conn, b) == [], "the counterpart must learn nothing about a refusal"
+        assert all("SECRET-PROSE-7" not in note for note in _notes_for(conn, a))
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("case", sorted(BAD_VALUES))
+def test_manual_offer_endpoint_validates_values_too(client, case):
+    tag, url = BAD_VALUES[case]
+    a, b, cid, pid = _pair()
+    conn = db.connect()
+    try:
+        version = db.one(conn, "SELECT version FROM proposals WHERE id=?", (pid,))["version"]
+    finally:
+        conn.close()
+    util.direct_session(client, a)  # delegation OFF: the click is the consent, the value is not
+
+    r = client.post(
+        "/api/chat/offer-respond",
+        json={
+            "action": "offer",
+            "candidate_id": cid,
+            "proposal_version": version,
+            "tag": tag,
+            "url": url,
+        },
+    )
+
+    assert r.status_code == 422, r.text
+    assert r.json()["error"] == "payload_forbidden"
+    conn = db.connect()
+    try:
+        assert db.one(
+            conn, "SELECT COUNT(*) AS n FROM activity_offers WHERE candidate_id=?", (cid,)
+        )["n"] == 0
+        assert _notes_for(conn, b) == []
+    finally:
+        conn.close()
+
+
+# ------------------------------------------------------------------ section: lifecycle
+
+
+def test_purge_and_cascade(db_env):
+    # db_env patches the DB path; init explicitly (this test uses no client fixture).
+    db.init_db()
+    conn = db.connect()
+    try:
+        with db.immediate(conn):
+            conn.execute("INSERT INTO users (email, display_name, preset_avatar_id, created_at)"
+                         " VALUES ('p@x.test','P',1,?)", (db.utcnow(),))
+            uid = conn.execute("SELECT id FROM users WHERE email='p@x.test'").fetchone()["id"]
+            chat.persist_user_message(conn, uid, "old")
+        with db.immediate(conn):
+            conn.execute("UPDATE chat_messages SET created_at=? WHERE user_id=?", ("2026-10-01T00:00:00Z", uid))
+        conn.execute("INSERT INTO chat_turns (user_id, kind, at) VALUES (?,'chat','2026-10-01T00:00:00Z')", (uid,))
+        removed = chat.purge_chat(conn, db.utcnow())
+        assert removed >= 2
+        assert db.one(conn, "SELECT COUNT(*) AS n FROM chat_messages WHERE user_id=?", (uid,))["n"] == 0
+
+        chat.persist_user_message(conn, uid, "fresh")
+        chat.cascade_chat(conn, uid)
+        assert db.one(conn, "SELECT COUNT(*) AS n FROM chat_messages WHERE user_id=?", (uid,))["n"] == 0
+    finally:
+        conn.close()
+
+
+def test_delete_history_serialized_with_lock(client):
+    uid = _register(client)
+    conn = db.connect()
+    try:
+        chat.persist_user_message(conn, uid, "whisper")
+        chat.persist_final_assistant(conn, uid, "reply")
+    finally:
+        conn.close()
+    r = client.delete("/api/chat")
+    assert r.json() == {"ok": True}
+    conn = db.connect()
+    try:
+        rows = [x["content"] for x in db.q(conn, "SELECT content FROM chat_messages WHERE user_id=?", (uid,))]
+        assert rows == ["history cleared"]
+    finally:
+        conn.close()
+
+
+def test_provider_error_becomes_honest_error_event(client, monkeypatch):
+    uid = _register(client)
+
+    async def broken(system, messages, *, transport=None):
+        raise chat.ai.AIError("ai_timeout", "the provider took too long")
+        yield ""
+
+    monkeypatch.setattr(chat.ai, "stream_reply", broken)
+    r = client.post("/api/chat", json={"content": "hello?"})
+    err = last_event(r, "error")
+    assert err["code"] == "ai_timeout"
+    conn = db.connect()
+    try:
+        notes = [x["content"] for x in db.q(conn, "SELECT content FROM chat_messages WHERE user_id=? AND role='note'", (uid,))]
+        assert any("could not answer" in n for n in notes)
+    finally:
+        conn.close()

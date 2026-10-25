@@ -120,6 +120,55 @@ def _check_shared_tag(conn, uid: int, other: int, tag: str) -> None:
         raise SchedulingError(422, "activity_not_shared", "the activity must be an interest you both share")
 
 
+def _validate_values(tag: object, url: object) -> tuple[str, str]:
+    """Value validation lives HERE, not in the callers (gate review P1 #2).
+
+    An allow-listed *key* is not an allow-listed *value*: the tag must come from the closed
+    vocabulary and the link must pass the same strict `offers.validate_url` the activity models
+    use. Endpoints may pre-check for a nicer message, but the last word is the core's, before the
+    first write of its own transaction — nothing unvalidated reaches a row, an inbox push or a
+    counterpart transcript.
+    """
+    if not isinstance(tag, str) or tag not in TAG_VOCAB:
+        raise SchedulingError(
+            422, "payload_forbidden", "the activity must come from the closed tag vocabulary"
+        )
+    try:
+        checked = offers.validate_url(url)
+    except ValueError as exc:
+        raise SchedulingError(422, "payload_forbidden", str(exc)) from exc
+    return tag, checked
+
+
+def _validate_reason(reason: object) -> str:
+    if not isinstance(reason, str) or reason not in offers.REASONS:
+        raise SchedulingError(
+            422, "payload_forbidden", f"reason must be one of {', '.join(offers.REASONS)}"
+        )
+    return reason
+
+
+def _require_autonomous_consent(conn, uid: int, now: str) -> None:
+    """PLAN §C2a, re-read INSIDE the core's write transaction (gate review P1 #1).
+
+    An autonomous actor acts only while its delegation grant is live and its account still
+    exists. The caller's pre-check is advisory: a Settings withdrawal that commits between that
+    pre-check and this BEGIN IMMEDIATE is caught here, before the first write.
+    """
+    if not _user_alive(conn, uid):
+        raise SchedulingError(409, "delegation_required", "your account is no longer available")
+    granted = db.one(
+        conn,
+        "SELECT 1 FROM grants WHERE user_id=? AND kind='delegation' AND withdrawn_at IS NULL"
+        " AND expires_at > ? LIMIT 1",
+        (uid, now),
+    )
+    if granted is None:
+        raise SchedulingError(
+            409, "delegation_required", "your delegation was off when this would have applied"
+        )
+
+
 def _agent_offer_payload(conn, cand, prop, offer, *, counter_of=None, reason=None) -> dict:
     tz = display_tz(conn, cand)
     return {
@@ -141,10 +190,14 @@ def _agent_offer_payload(conn, cand, prop, offer, *, counter_of=None, reason=Non
 # ------------------------------------------------------------------ propose
 
 
-def propose(conn, uid: int, candidate_id: int, proposal_version: int, tag: str, url: str) -> dict:
+def propose(conn, uid: int, candidate_id: int, proposal_version: int, tag: str, url: str,
+            *, autonomous: bool = False) -> dict:
     with db.immediate(conn):
         now = db.utcnow()
         cand, other, prop = _guard(conn, uid, candidate_id, now)
+        if autonomous:  # authorization reads first, then the consent re-read, then any write
+            _require_autonomous_consent(conn, uid, now)
+        tag, url = _validate_values(tag, url)
         if prop["version"] != proposal_version:
             raise SchedulingError(409, "stale_version", "the time changed; reload the card")
         if db.one(conn, "SELECT 1 FROM proposal_confirmations WHERE proposal_id=? LIMIT 1", (prop["id"],)):
@@ -177,10 +230,13 @@ def propose(conn, uid: int, candidate_id: int, proposal_version: int, tag: str, 
 
 
 def respond(conn, uid: int, candidate_id: int, offer_id: int, response: str,
-            reason: str | None = None, tag: str | None = None, url: str | None = None) -> dict:
+            reason: str | None = None, tag: str | None = None, url: str | None = None,
+            *, autonomous: bool = False) -> dict:
     with db.immediate(conn):
         now = db.utcnow()
         cand, other, prop = _guard(conn, uid, candidate_id, now)
+        if autonomous:
+            _require_autonomous_consent(conn, uid, now)
         offer = db.one(conn, "SELECT * FROM activity_offers WHERE id=? AND candidate_id=?", (offer_id, cand["id"]))
         if offer is None:
             raise SchedulingError(404, "not_found", "no such offer")
@@ -205,6 +261,7 @@ def respond(conn, uid: int, candidate_id: int, offer_id: int, response: str,
             return {"state": "accepted", "offer_id": offer["id"]}
 
         if response == "pass":
+            reason = _validate_reason(reason)
             conn.execute(
                 "UPDATE activity_offers SET state='passed', reason=?, responder_id=?, responded_at=? WHERE id=?",
                 (reason, uid, now, offer["id"]),
@@ -227,6 +284,7 @@ def respond(conn, uid: int, candidate_id: int, offer_id: int, response: str,
         next_round = offer["round"] + 1
         if next_round > offers.MAX_ROUNDS:
             raise SchedulingError(409, "round_limit", "last round: accept or pass")
+        tag, url = _validate_values(tag, url)
         _check_shared_tag(conn, uid, other, tag)
         conn.execute(
             "UPDATE activity_offers SET state='countered', reason=?, responder_id=?, responded_at=? WHERE id=?",
