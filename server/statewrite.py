@@ -22,7 +22,9 @@ import hashlib
 import json
 from zoneinfo import ZoneInfo
 
-from server import config, db, interests, matching, scheduling, wording
+from server import config, db, interests, logging as smlog, matching, scheduling, wording
+
+log = smlog.get("state")
 from server.schema import StatePayload
 
 _UTC_FMT = "%Y-%m-%dT%H:%M:%SZ"
@@ -298,8 +300,12 @@ def write_state(
         # end state after one POST is already up to date. Chat mode always runs this: it
         # only writes when data changed, and uncovered plans must die the same way.
         _void_uncovered_plans(conn, user_id, now)
-        matching.generate_for_user(conn, user_id)
+        new_ids = matching.generate_for_user(conn, user_id)
         matching.refresh_events(conn, user_id)
+        log.info(
+            "state_write user=%s mode=%s changed=%s windows=%s new_candidates=%s",
+            user_id, mode, changed, len(payload.windows), len(new_ids),
+        )
 
     return {
         "changed": changed,

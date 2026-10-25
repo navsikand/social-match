@@ -12,10 +12,13 @@ score formula is 3*shared_tags + 2*overlap_hours + 1*both_want_event, plus 4 for
 event link both students sent (user_events). `busy_load` is stored for the ranker but this
 rule baseline deliberately ignores it, so a learned model can be compared against it.
 """
+import collections
 import datetime
 import json
 
-from server import db, wording
+from server import db, logging as smlog, wording
+
+log = smlog.get("match")
 
 # A pair only becomes a candidate when an intersection segment is at least this long.
 MIN_OVERLAP_SECONDS = 30 * 60
@@ -156,17 +159,32 @@ def _pair_swiped(conn, user_a: int, user_b: int) -> bool:
 
 
 def generate_for_user(conn, user_id: int) -> list[int]:
-    """Generate candidates for this user against everyone else. Returns new candidate ids."""
+    """Generate candidates for this user against everyone else. Returns new candidate ids.
+
+    EXTENSIVE LOGGING (see server/logging.py): every pass writes one `sm.match` summary line
+    naming how many other users existed and how many were refused by each gate. That line is
+    the answer to "why do I see no matches": silence used to be indistinguishable between
+    "nobody else is available", "you never granted matching", and "no overlapping free time".
+    Per-pair detail goes to DEBUG; content (windows, tags) is never logged.
+    """
     now = db.utcnow()
+    skips: collections.Counter[str] = collections.Counter()
 
     mine = _windows(conn, user_id)
     if not mine:
+        log.info("user=%s pass=aborted reason=no_windows_of_my_own", user_id)
         return []
 
     my_avail = conn.execute(
         "SELECT expires_at FROM availability WHERE user_id=?", (user_id,)
     ).fetchone()
     if my_avail is None or my_avail["expires_at"] <= now:
+        log.info(
+            "user=%s pass=aborted reason=availability_expired_or_missing expires_at=%s now=%s",
+            user_id,
+            (my_avail["expires_at"] if my_avail else None),
+            now,
+        )
         return []
 
     # Display rule for our payloads: the REQUESTER's earliest window tz (first row by starts_at).
@@ -181,6 +199,10 @@ def generate_for_user(conn, user_id: int) -> list[int]:
         (user_id, now),
     ).fetchall()
 
+    def skip(reason: str, pair_other: int) -> None:
+        skips[reason] += 1
+        log.debug("user=%s other=%s skip=%s", user_id, pair_other, reason)
+
     new_ids: list[int] = []
     for other in others:
         other_id = other["user_id"]
@@ -189,28 +211,44 @@ def generate_for_user(conn, user_id: int) -> list[int]:
         user_a, user_b = (user_id, other_id) if user_id < other_id else (other_id, user_id)
 
         if _pair_has_candidate(conn, user_a, user_b):
+            skip("pair_already_has_candidate", other_id)
             continue
         if _pair_swiped(conn, user_a, user_b):
+            skip("pair_already_swiped", other_id)
             continue
         if wording.blocked_pair(conn, user_a, user_b):
+            skip("pair_blocked", other_id)
             continue
         if not wording.matching_live(conn, user_a, user_b):
+            # The single most common cause of "I see no matches": both students need a LIVE
+            # matching grant. Chat writes are grant-preserving by design, so a student who has
+            # only ever talked to the assistant has never granted matching.
+            mine_live = wording.live_grant(conn, user_id, "matching") is not None
+            theirs_live = wording.live_grant(conn, other_id, "matching") is not None
+            skip(
+                "matching_grant_missing_me" if not mine_live else "matching_grant_missing_them",
+                other_id,
+            )
             continue
 
         # FLOW §2 authorization table: a card — and its candidate notification — about X
         # requires X's live publication grant. Without a card grant there is no card at all;
         # a bare card grant demotes to pseudonym, it never blocks (reviewer P1 #2).
         if wording.live_grant(conn, user_id, "publication", "card") is None:
+            skip("publication_card_missing_me", other_id)
             continue
         if wording.live_grant(conn, other_id, "publication", "card") is None:
+            skip("publication_card_missing_them", other_id)
             continue
 
         their_windows = _windows(conn, other_id)
         if not their_windows:
+            skip("other_has_no_windows", other_id)
             continue
 
         overlap = _longest_overlap(mine, their_windows)
         if overlap is None:
+            skip("no_overlapping_free_time", other_id)
             continue
         seg_start, seg_end, seg_seconds = overlap
 
@@ -265,5 +303,30 @@ def generate_for_user(conn, user_id: int) -> list[int]:
         )
 
         new_ids.append(candidate_id)
+        log.info(
+            "user=%s other=%s candidate=%s score=%s overlap_hours=%s shared_tags=%s",
+            user_id, other_id, candidate_id, score, overlap_hours, len(shared),
+        )
 
+    # One line per pass, always. This is the line to grep when a student says "no matches".
+    if skips:
+        log.info(
+            "user=%s pass=done others=%s new=%s skip=%s",
+            user_id,
+            len(others),
+            len(new_ids),
+            dict(skips.most_common()),
+        )
+    else:
+        log.info(
+            "user=%s pass=done others=%s new=%s skip=none",
+            user_id,
+            len(others),
+            len(new_ids),
+        )
+    if not others:
+        log.info(
+            "user=%s nobody_else_is_available reason=no_other_user_has_a_live_availability_row",
+            user_id,
+        )
     return new_ids

@@ -39,7 +39,9 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
-from server import activity, ai, config, db, events as events_mod, offers, statewrite
+from server import activity, ai, config, db, events as events_mod, logging as smlog, offers, statewrite
+
+log = smlog.get("chat")
 from server.schema import (
     MAX_TAGS,
     MAX_WINDOWS,
@@ -915,10 +917,15 @@ async def run_turn(conn, uid: int, turn: Turn) -> AsyncIterator[dict]:
 
     # Capture the state version BEFORE anything else: every apply path re-checks it.
     h0 = current_state_hash(conn, uid)
+    log.info(
+        "turn_start user=%s kind=%s chars=%s state_hash=%s",
+        uid, turn.kind, len(turn.user_text or ""), h0,
+    )
     if turn.kind == "user" and turn.user_text is not None:
         persist_user_message(conn, uid, turn.user_text)
     system = build_system_prompt(conn, uid, turn)
     messages = _provider_messages(conn, uid)
+    log.debug("turn_prompt user=%s system_chars=%s history_msgs=%s", uid, len(system), len(messages))
 
     chunks: list[str] = []
     provider_error: ai.AIError | None = None
@@ -967,6 +974,10 @@ async def run_turn(conn, uid: int, turn: Turn) -> AsyncIterator[dict]:
         yield {"type": "done"}
         return
 
+    log.info(
+        "turn_provider_done user=%s kind=%s status=%s chars=%s",
+        uid, turn.kind, status, len(text),
+    )
     if persist_final_assistant(conn, uid, text) is None:
         # The account was deleted while the provider was thinking: a dropped turn. The text
         # was not stored, and no action may run (there is nobody to apply it for).
@@ -974,6 +985,7 @@ async def run_turn(conn, uid: int, turn: Turn) -> AsyncIterator[dict]:
         return
 
     if status != ai.DONE:
+        log.warning("turn_cut_off user=%s status=%s actions=refused", uid, status)
         # The reply was cut off (cap) or never terminated ([DONE] missing). Its text is honest
         # record-keeping; its fence is not an instruction.
         note = CUT_OFF_NOTE
@@ -1024,6 +1036,10 @@ async def run_turn(conn, uid: int, turn: Turn) -> AsyncIterator[dict]:
             yield {"type": "done"}
             return
         pending_id = _store_pending(conn, uid, kind, ops, items, h0)
+        log.info(
+            "turn_preview user=%s kind=%s items=%s ops=%s pending=%s",
+            uid, kind, len(items), [op["op"] for op in ops], pending_id,
+        )
         if pending_id is None:  # the account went away mid-turn: nothing is stored
             yield {"type": "done"}
             return
@@ -1041,6 +1057,10 @@ async def run_turn(conn, uid: int, turn: Turn) -> AsyncIterator[dict]:
         return
 
     applied, conflict = _apply_immediate(conn, uid, ops, h0)
+    if conflict is not None:
+        log.warning("turn_conflict user=%s detail=%s", uid, conflict)
+    else:
+        log.info("turn_applied user=%s ops=%s", uid, [op["op"] for op in applied])
     if conflict is not None:
         with contextlib.suppress(Exception):
             persist_note(conn, uid, f"nothing applied: {conflict}")

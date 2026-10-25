@@ -35,7 +35,9 @@ import contextlib
 import datetime
 import json
 
-from server import activity, chat, config, db, offers, wording
+from server import activity, chat, config, db, logging as smlog, offers, wording
+
+log = smlog.get("negotiate")
 from server.schema import TAG_VOCAB
 from server.scheduling import counterpart, current_proposal, display_tz
 
@@ -344,6 +346,11 @@ async def tick_once(conn=None) -> dict:
     finally:
         if own:
             conn.close()
+    if stats["pending"] or stats["answered"]:
+        log.info(
+            "tick pending=%s answered=%s skipped=%s",
+            stats["pending"], stats["answered"], stats["skipped"],
+        )
     return stats
 
 

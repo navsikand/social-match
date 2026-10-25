@@ -36,7 +36,9 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-from server import chat, db, statewrite
+from server import chat, db, logging as smlog, statewrite
+
+log = smlog.get("schedule")
 from server.schema import MAX_WINDOW_HOURS, MAX_WINDOWS, StatePayload, Window
 from server.sessions import require_session
 
@@ -579,8 +581,12 @@ async def set_windows(request: Request, user=Depends(require_session), conn=Depe
             base["windows"] = [window.model_dump(mode="json") for window in windows]
             base["free_time"]["student_confirmed_at"] = now  # the Save click is the provenance
             payload = StatePayload.model_validate(base)
-            statewrite.write_state(conn, uid, payload, mode="chat")
+            result = statewrite.write_state(conn, uid, payload, mode="chat")
             chat.persist_note(conn, uid, f"windows updated: {len(payload.windows)} stored")
+            log.info(
+                "manual_windows_saved user=%s windows=%s changed=%s",
+                uid, len(payload.windows), result.get("changed"),
+            )
     except ValidationError as exc:
         return _forbidden(f"those windows cannot be stored: {chat._first_error(exc)}")
 

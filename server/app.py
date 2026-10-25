@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from server import config, db, sweep
+from server import config, db, logging as smlog, sweep
 from server import (
     activity,
     chat,
@@ -26,7 +26,16 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webui", "
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
+    log = smlog.get("app")
     db.init_db()
+    log.info(
+        "startup db=%s log_level=%s ai_configured=%s ai_url_host=%s base_url=%s",
+        config.db_path(),
+        smlog.level_name(),
+        config.ai_api_url() is not None,
+        (config.ai_api_url() or "").split("/")[2] if config.ai_api_url() else None,
+        config.base_url(),
+    )
     task = asyncio.create_task(sweep.loop())
     nego = None
     if config.ai_api_url() is not None:
@@ -60,11 +69,31 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 @app.middleware("http")
 async def _sensitive_no_store(request: Request, call_next):
     """Gate review P2: photos, matches and every JSON error are per-viewer and revocable, so
-    mark the whole API surface (and served images) non-cacheable, including refusals."""
-    response = await call_next(request)
+    mark the whole API surface (and served images) non-cacheable, including refusals.
+
+    Also the request log: one line per request with status + duration. Bodies are never
+    logged (transcripts and payloads are private); method, path, status and timing are enough
+    to see whether a turn was even reached by the server.
+    """
+    import time
+
+    started = time.monotonic()
     path = request.url.path
+    try:
+        response = await call_next(request)
+    except Exception:
+        smlog.get("http").exception(
+            "request method=%s path=%s status=EXCEPTION ms=%.1f",
+            request.method, path, (time.monotonic() - started) * 1000,
+        )
+        raise
     if path.startswith("/api/") or path.startswith("/media/"):
         response.headers["Cache-Control"] = "no-store"
+    if path.startswith("/api/") or path.startswith("/chat") or path.startswith("/schedule"):
+        smlog.get("http").info(
+            "request method=%s path=%s status=%s ms=%.1f",
+            request.method, path, response.status_code, (time.monotonic() - started) * 1000,
+        )
     return response
 
 @app.exception_handler(HTTPException)
