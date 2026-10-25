@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Social Match — pitch</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- progress + chrome -->
+<div class="progress" aria-hidden="true"><span id="progress-fill"></span></div>
+<div class="chrome">
+  <span class="mark">Social&nbsp;Match</span>
+  <span class="counter"><b id="slide-now">1</b>/<span id="slide-total">12</span></span>
+</div>
+<div class="hint" id="hint" aria-hidden="true">→ space / arrows · <kbd>F</kbd> fullscreen · <kbd>N</kbd> notes</div>
+
+<main id="deck">
+
+  <!-- 1 ────────────────────────────────────────────── -->
+  <section class="slide slide--title" data-notes="Open with the one-liner. Pause after 'explicit yes'. The joke is the architecture: propose, preview, confirm.">
+    <p class="eyebrow">Track 2 · agent-to-agent coordination</p>
+    <h1>Your assistant does<br><em>all the foreplay.</em></h1>
+    <p class="sub">It finds the free slot, proposes it, and waits for your explicit yes.</p>
+    <p class="fine">Two students' AI assistants negotiate one real plan.<br>
+       The humans keep the only veto that matters.</p>
+    <div class="rule"></div>
+    <p class="byline">Aradhya Dixit · Navraj Sikand</p>
+  </section>
+
+  <!-- 2 ────────────────────────────────────────────── -->
+  <section class="slide" data-notes="Everyone has this conversation. It costs three days and eleven messages, and it starts with you handing over your entire week to get one hour.">
+    <p class="eyebrow">The problem</p>
+    <h2>“So… when are you free?”</h2>
+    <div class="two-col">
+      <div class="frag">
+        <p>“free this week?”</p>
+        <p class="muted">“tuesday?”</p>
+        <p>“tuesday i have lab till 6”</p>
+        <p class="muted">“wed after 8?”</p>
+        <p>“wed is the thing”</p>
+        <p class="muted">“thursday?”</p>
+        <p class="ghost">…11 messages, 3 days later</p>
+      </div>
+      <div class="cost">
+        <p class="big">One hour together<br>costs <em>a whole calendar.</em></p>
+        <p class="muted">So we hand over screenshots of our week to find out if someone is free.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 3 ────────────────────────────────────────────── -->
+  <section class="slide" data-notes="The insight: the negotiation is the boring part, and it is exactly what an agent is good at. The consent is the part that must stay human.">
+    <p class="eyebrow">The idea</p>
+    <h2>Let the agents argue.<br>Keep the <em>yes</em>.</h2>
+    <div class="split-rule">
+      <div>
+        <h3 class="machine">Machines decide</h3>
+        <ul class="ticks">
+          <li>when you overlap</li>
+          <li>which activity, and where</li>
+          <li>what to counter with, and why</li>
+        </ul>
+      </div>
+      <div>
+        <h3 class="human">Humans decide</h3>
+        <ul class="ticks">
+          <li>that the time is really yours</li>
+          <li>that the plan is on</li>
+          <li>whether to withdraw it</li>
+        </ul>
+      </div>
+    </div>
+    <p class="punch">A message never says “you're on” until the second person confirms.<br>
+      <span class="muted">A test fails the build if that word appears early.</span></p>
+  </section>
+
+  <!-- 4 ────────────────────────────────────────────── -->
+  <section class="slide" data-notes="Walk the five beats. Emphasise step 1: the click is the provenance — that is what the server records as approval, and it cannot be forged by the model.">
+    <p class="eyebrow">The loop</p>
+    <h2>Five beats, one decision</h2>
+    <ol class="beats">
+      <li><span class="n">01</span><b>Tell your assistant when you're free</b>
+        <span class="d">it answers with a preview card, not a write</span></li>
+      <li><span class="n">02</span><b>You press Confirm</b>
+        <span class="d">the click is the provenance; the model cannot press it</span></li>
+      <li><span class="n">03</span><b>The matcher finds the overlap</b>
+        <span class="d">one card per person, over the longest overlap, 30 min minimum</span></li>
+      <li><span class="n">04</span><b>The assistants negotiate the activity</b>
+        <span class="d">offer → accept / counter / pass + a reason code, 3 rounds</span></li>
+      <li><span class="n">05</span><b>Both humans swipe</b>
+        <span class="d">only then is there a plan — withdrawable at any time</span></li>
+    </ol>
+  </section>
+
+  <!-- 5 ────────────────────────────────────────────── -->
+  <section class="slide" data-notes="This is the architecture slide. Point at the firewall: the assistant can propose and negotiate, but grant mutation is agent-only — a chat write can never create, renew or withdraw consent.">
+    <p class="eyebrow">Architecture</p>
+    <h2>Four pieces, one firewall</h2>
+    <div class="arch">
+      <div class="box">
+        <span class="tag">interface</span>
+        <h3>Chat</h3>
+        <p>Talk to your own assistant. Anything touching availability returns as a preview.</p>
+      </div>
+      <div class="box">
+        <span class="tag">agent</span>
+        <h3>Your assistant</h3>
+        <p>Reads your state, writes through the validated path, answers offers only if you delegate.</p>
+      </div>
+      <div class="box box--fire">
+        <span class="tag">broker</span>
+        <h3>The server</h3>
+        <p>Allowlist, matching, consent, retention clocks, and the model provider call.</p>
+        <p class="firewall">✕ no grant may be changed from here</p>
+      </div>
+      <div class="box">
+        <span class="tag">human</span>
+        <h3>Card &amp; matches</h3>
+        <p>Swipe, counter, withdraw. No assistant can do these.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6 ────────────────────────────────────────────── -->
+  <section class="slide" data-notes="Five grants, all versioned, all re-read at the moment they are relied on — never cached. Turning matching off deletes availability; the UI now warns and confirms.">
+    <p class="eyebrow">Consent</p>
+    <h2>Five grants, re-read at the moment of use</h2>
+    <div class="grants">
+      <div class="grant"><h3>matching</h3><p>Your windows and tags may generate candidates — and are re-checked at confirmation.</p></div>
+      <div class="grant"><h3>publication · card</h3><p>A card and its notification, to matched users only.</p></div>
+      <div class="grant"><h3>publication · name</h3><p>Your display name on that card, to matched users only.</p></div>
+      <div class="grant"><h3>reveal</h3><p>Pair-scoped messaging once both agree. <span class="muted">Designed; not in the demo.</span></p></div>
+      <div class="grant grant--hot"><h3>delegation</h3><p>“Let my assistant answer offers for me.” Off by default. Only Settings can change it.</p></div>
+    </div>
+    <p class="punch">Withdrawal is checked <em>inside the transaction</em> that would apply the decision.<br>
+      <span class="muted">So an in-flight negotiation cannot slip through a revoke.</span></p>
+  </section>
+
+  <!-- 7 ────────────────────────────────────────────── -->
+  <section class="slide" data-notes="The privacy claim is a schema, not a promise. extra='forbid' at every level. The card shows the words a student typed; the matcher scores the canonical tag.">
+    <p class="eyebrow">Privacy</p>
+    <h2>What crosses the wire<br>&amp; what never does</h2>
+    <div class="wire">
+      <div class="wire-col">
+        <h3 class="machine">Shared, after consent</h3>
+        <ul class="ticks">
+          <li>UTC time ranges <span class="muted">(+ a tz for display)</span></li>
+          <li>interest tags, in your words</li>
+          <li><code>hangout</code> / <code>event</code>, busy 0–3</li>
+          <li>a consent block</li>
+          <li>a note of four fixed fields</li>
+        </ul>
+      </div>
+      <div class="wire-col wire-col--never">
+        <h3 class="human">Never leaves</h3>
+        <ul class="crosses">
+          <li>event titles, attendees, locations</li>
+          <li>course codes, professors, grades</li>
+          <li>your chat transcript</li>
+          <li>anything an assistant decided alone</li>
+        </ul>
+      </div>
+    </div>
+    <p class="fine">It is not a policy — <code>server/schema.py</code> is an allowlist with
+      <code>extra="forbid"</code> at every level. Anything else is <code>422</code>.</p>
+  </section>
+
+  <!-- 8 ────────────────────────────────────────────── -->
+  <section class="slide" data-notes="This is the judge beat: conflicting constraints. Private budget rules out the pick, so the agent counters with another shared interest and a reason code. No amount ever leaves the device.">
+    <p class="eyebrow">The interesting part</p>
+    <h2>Conflicting constraints</h2>
+    <div class="convo">
+      <div class="msg a"><span>Assistant A</span>“Climbing at Summit, Saturday 14:00?”</div>
+      <div class="msg b"><span>Assistant B</span>“Too expensive for us. <em>Ramen</em> instead? <code>too_expensive</code>”</div>
+      <div class="msg a"><span>Assistant A</span>“Deal. Saturday 14:00, ramen.”</div>
+    </div>
+    <div class="chips">
+      <span>reason codes only — no amounts</span>
+      <span>shared tag required</span>
+      <span>https link, never fetched</span>
+      <span>3 rounds, then the time stands</span>
+    </div>
+  </section>
+
+  <!-- 9 ────────────────────────────────────────────── -->
+  <section class="slide" data-notes="Three mechanisms that are easy to get wrong and that we test: grant-preserving writes, [DONE] gating, and in-transaction consent re-reads.">
+    <p class="eyebrow">The hard part</p>
+    <h2>Three ways to get this wrong</h2>
+    <div class="wrong">
+      <div>
+        <h3>1 · A chat write must not renew consent</h3>
+        <p>Two write modes. <code>agent</code> keeps legacy grant-renewal. <code>chat</code> is <strong>grant-preserving</strong> and revalidates liveness and state version inside its own transaction.</p>
+      </div>
+      <div>
+        <h3>2 · A truncated reply must not act</h3>
+        <p>Only a clean <code>[DONE]</code> completion may execute actions. A capped or unterminated stream is text, never an instruction.</p>
+      </div>
+      <div>
+        <h3>3 · A revoke must win the race</h3>
+        <p>The delegation grant is re-read inside the same transaction that writes the offer, so withdrawing mid-turn changes the outcome.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 10 ───────────────────────────────────────────── -->
+  <section class="slide" data-notes="Rigor as evidence. Three review gates blocked on six defects that our own fixes introduced — including a save path that could have emptied a student's availability. Say that plainly; it is the most credible thing in the deck.">
+    <p class="eyebrow">Rigor</p>
+    <h2>We shipped it through gates, not vibes</h2>
+    <div class="stats">
+      <div class="stat"><b data-count="544">544</b><span>tests</span></div>
+      <div class="stat"><b data-count="17">17</b><span>demo beats</span></div>
+      <div class="stat"><b data-count="38">38</b><span>UX findings</span></div>
+      <div class="stat"><b data-count="3">3</b><span>review gates</span></div>
+    </div>
+    <p class="honest">The gates blocked on <strong>six defects our own fixes introduced</strong> —
+      including a save path that could have emptied a student's availability,
+      and a “Withdraw” button hidden by the patch meant to reveal it.</p>
+    <p class="fine">Every one is closed and pinned by a test that fails if the guard is removed.</p>
+  </section>
+
+  <!-- 11 ───────────────────────────────────────────── -->
+  <section class="slide" data-notes="If they only remember one line, this is it: an agent may propose, a human is the only thing that can confirm.">
+    <p class="eyebrow">The one line</p>
+    <blockquote>
+      An agent may <em>propose</em>.<br>
+      A human is the only thing<br>that can <em>confirm</em>.
+    </blockquote>
+    <p class="fine">Everything else — matching, negotiation, retention, encryption of nothing at rest —
+      is machinery around that sentence.</p>
+  </section>
+
+  <!-- 12 ───────────────────────────────────────────── -->
+  <section class="slide slide--end" data-notes="Close on the pun, then the command. Leave the URL up.">
+    <p class="eyebrow">Try it</p>
+    <h2>Two accounts, sixty seconds</h2>
+    <pre class="cmd"><span class="c">$</span> uv sync
+<span class="c">$</span> uv run uvicorn server.app:app
+<span class="c">#</span> register both · /chat · “free weekends”
+<span class="c">#</span> Confirm · Dashboard · swipe right on both</pre>
+    <p class="punch">Free time, mutual consent, and a strictly bounded overlap.</p>
+    <p class="fine">The only calendar app that asks before it comes.</p>
+    <div class="rule"></div>
+    <p class="byline">Aradhya Dixit · Navraj Sikand</p>
+  </section>
+
+</main>
+
+<nav class="dots" id="dots" aria-label="Slides"></nav>
+<div class="notes" id="notes" hidden><p></p></div>
+
+<script src="script.js"></script>
+</body>
+</html>
