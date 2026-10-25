@@ -3,7 +3,7 @@
 {% block content %}
 <section class="hero">
   <h1>Your match cards</h1>
-  <p class="muted">Cards appear here when Cubbie finds an overlap with someone who shares your intent.
+  <p class="muted">Cards appear here when the matcher finds an overlap with someone who shares your intent.
     Nothing is shared until both sides confirm.</p>
 </section>
 
@@ -15,18 +15,6 @@
   <div id="dash-list" class="cards"></div>
 </section>
 
-<section class="panel" id="cubbie-skill">
-  <h2>Share your availability with Cubbie</h2>
-  <p>Cubbie reads your calendar, drops event titles, and keeps only free time ranges and hobby tags.
-    You review the exact payload before anything leaves your machine — the server only accepts the
-    allowlisted shape and rejects everything else.</p>
-  <ol class="steps">
-    <li>Pair this account with Cubbie so it can reach your inbox.</li>
-    <li>Ask Cubbie to compute your free windows for the next few weeks.</li>
-    <li>Approve the payload it shows you; availability expires after a few days and is never assumed stale.</li>
-  </ol>
-  <p><a href="/skill">Read the Cubbie skill instructions →</a></p>
-</section>
 {% endblock %}
 {% block scripts %}
 <script>

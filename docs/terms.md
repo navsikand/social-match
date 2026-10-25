@@ -4,7 +4,7 @@ WHAT THIS IS
 
 Study Match is a hackathon demo. You sign in and talk to your own AI assistant; two students' assistants negotiate one
 plan through a small broker server, and the website holds your chat, your schedule, the card, the swipe and the confirm.
-The Cubbie skill still works as a legacy/alternate client, and the paragraphs that mention it say where that path
+A phone-agent client still works as a legacy/alternate path, and the paragraphs that mention it say where that path
 differs. It is a class-project artefact, provided as-is, for demonstration. It is not a production social product and it
 comes with no safety guarantees of one: no automated moderation, no background checks, no
 verification of who anyone is, no uptime promise, and no promise that the person on the other side of a card is who the
@@ -21,7 +21,7 @@ YOUR ASSISTANT, YOUR RESPONSIBILITY
 
 Your assistant acts for you. You are responsible for what you type, what you upload, and what it sends on your behalf.
 In the chat app that means the words in the box and any `.ics` file you choose on the schedule page; in the legacy path
-it means what the Cubbie Skill sends, in the same way Cubbie's own terms make you responsible for your agent's actions.
+it means what your agent sends, in the same way the agent platform's own terms make you responsible for its actions.
 The server separately re-checks every consent grant at the moment it is relied on, and it re-checks your state before it
 applies anything — but none of that is a substitute for reading what you are about to agree to. If you tell the
 assistant to send something, we treat that as your instruction.

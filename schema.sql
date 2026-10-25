@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS availability (
   payload_hash TEXT,
   observed_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
-  source TEXT NOT NULL CHECK (source IN ('student','cubbie_computed'))
+  source TEXT NOT NULL CHECK (source IN ('student','agent_computed'))
 );
 
 CREATE TABLE IF NOT EXISTS availability_windows (

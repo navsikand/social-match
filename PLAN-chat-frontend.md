@@ -1,4 +1,4 @@
-# Plan v2 — our own chat app (Cubbie out of the loop)
+# Plan v2 — our own chat app (the phone agent out of the loop)
 
 Status: seeking approval. No code written. v1 was reviewed: **FIX-PLAN, 12 findings (1×P0, 9×P1, 2×P2)** —
 all are integrated below; §0 summarises the turnaround. Facts re-verified after review corrections:
@@ -8,10 +8,10 @@ the P0.
 
 ## Context
 
-Cubbie was the interface: its skill read the calendar on the phone, asked consent, POSTed state. It is
+the phone agent was the interface: its skill read the calendar on the phone, asked consent, POSTed state. It is
 inconvenient and unreliable, so the product face becomes **our own chat app**. The LLM behind it speaks the
 **OpenAI chat-completions protocol only**, configured entirely in env. The one demo affordance that replaces
-"Cubbie reads my calendar" is a **manual schedule page** (define windows by hand; bounded `.ics` upload).
+"the phone agent reads my calendar" is a **manual schedule page** (define windows by hand; bounded `.ics` upload).
 Matching, photos and inbox stay real; activity negotiation is **explicitly out of the chat's scope** (see §F6).
 
 Probes on 25 Oct: `httpx>=0.27` already a runtime dep; `deploy/run.sh` sources `socialmatch.conf`;
@@ -231,9 +231,9 @@ characters stripped, URLs shown as plain text — never rendered as markup.
 |---|---|
 | "Only these things, and only because…" (exhaustive collection) | add chat transcripts (user + assistant text) and the chat/schedule surfaces to the list |
 | "Interests … are the only free-text field" | "the only free-text field in *structured state*"; chat text is a new, separate free-text surface with its own retention (7 days) and provider flow |
-| "How busy you are … computed on your phone" | busy is computed on the phone if you use the Cubbie skill, or given by you / the assistant in chat |
+| "How busy you are … computed on your phone" | busy is computed on the phone if you use the phone-agent skill, or given by you / the assistant in chat |
 | "WHAT WE NEVER ACCEPT" (no free text, second exception list) | keep for *structured state*; state plainly that chat accepts free text by design (bounded per turn), and that the .ics upload is parsed server-side with only intervals kept |
-| "your Cubbie agent reads your calendar on your phone … deletes the rest" | true of the legacy skill path only; the chat path is: you type, or you upload an .ics that is read once in memory and reduced to intervals before anything is stored |
+| "your the agent reads your calendar on your phone … deletes the rest" | true of the legacy skill path only; the chat path is: you type, or you upload an .ics that is read once in memory and reduced to intervals before anything is stored |
 | "We do not use sub-processors" | **false now**: chat turns (system prompt + last 40 messages + your text) are sent to the model provider named in configuration; we do not control provider retention; don't type secrets |
 | "your swipes, the activity offers…" deletion list | + chat transcript and pending previews are deleted with the account |
 | (new grant) | `delegation` joins matching/publication as a consent you can withdraw: "your assistant may accept, counter or pass offers for you"; transcripts include autonomous negotiation turns; FLOW §2 documents the grant, its default-off posture, and that only Settings can change it (chat never can) |
@@ -244,7 +244,7 @@ wrong about your own state — the chips and Settings page are the truth.
 README/FLOW: **negotiation is assistant-to-assistant, by design** — each student's own assistant settles
 what-to-do against the other side's assistant through the existing activity core, then tells its human "found
 a match — go swipe." Autonomy is gated on the `delegation` grant (off by default); swiping and plan
-confirmation are human-only, always. The Cubbie skill is documented as the legacy/alternate client.
+confirmation are human-only, always. The phone agent skill is documented as the legacy/alternate client.
 `.env.example` gains the AI block.
 
 ### G. Tests

@@ -31,23 +31,23 @@ anything publicly or be ranked against anyone.**
 | ❌ Agent asks | "Who in BIO 201 has a good grade?" |
 
 Grades are the *input* to a private local judgement — should I offer help or ask for it? — never the payload. And the
-downgrade happens **inside the student's own Cubbie**: Canvas grades never reach our server at all. That's not a policy
+downgrade happens **inside the student's own the phone agent**: Canvas grades never reach our server at all. That's not a policy
 we have to defend, it's an architectural fact anyone can check — `grep -r "grade" server/` returns nothing.
 
 ## Two constraints that shape everything
 
-Cubbie is the sensor and the mouth: it has the Canvas and Google Calendar integrations we are not going to rebuild.
+the phone agent is the sensor and the mouth: it has the Canvas and Google Calendar integrations we are not going to rebuild.
 That decision costs us two things.
 
-### 1. Nothing can push into Cubbie
+### 1. Nothing can push into the phone agent
 
-No webhook, no inbound port, no "the server wakes the agent". A Cubbie Skill runs only when **the student texts** or
+No webhook, no inbound port, no "the server wakes the agent". A the phone-agent Skill runs only when **the student texts** or
 **a scheduled check-in fires**. So this is **pull, not push**, and the check-in cadence is the event loop.
 
 | Path | Latency |
 | --- | --- |
 | Student sends anything that triggers the Skill | instant — and the Skill polls `/inbox` on the way past |
-| Scheduled check-in (twice a day is sensible) | minutes to hours, per Cubbie's scheduler and notification settings |
+| Scheduled check-in (twice a day is sensible) | minutes to hours, per the phone agent's scheduler and notification settings |
 
 Two consequences you must design around:
 
@@ -58,7 +58,7 @@ Two consequences you must design around:
 - **Never promise realtime.** "Ava asks Tuesday, Ben's phone buzzes Wednesday morning, both confirm" is honest and
   still a good demo.
 
-### 2. Cubbie tells a Skill nothing about who the student is
+### 2. the phone agent tells a Skill nothing about who the student is
 
 No user id, no email, no stable handle — just a sandbox and a conversation. The mapping **cannot be inferred, only
 established once**. That's the auth section below, and it is the load-bearing piece.
@@ -66,7 +66,7 @@ established once**. That's the auth section below, and it is the load-bearing pi
 ## Architecture
 
 ```text
-   Cubbie (Ava)                      OUR SERVER                     Cubbie (Ben)
+   the phone agent (Ava)                      OUR SERVER                     the phone agent (Ben)
 ┌───────────────────┐                                        ┌───────────────────┐
 │ Skill: study-match │   HTTPS 443, one host, no inbound      │ Skill: study-match │
 │  scripts/bus.py    │ ─────────────►┌──────────────────┐◄───────────────        │
@@ -74,7 +74,7 @@ established once**. That's the auth section below, and it is the load-bearing pi
 └───────────────────┘               │ /requests /offers│                        │
                                     │ /confirm /revoke │                        │
  Canvas + Calendar                  │ matcher, consent │      Canvas + Calendar │
- (Cubbie does this)                 │ ledger, audit    │      (Cubbie does this)│
+ (the phone agent does this)                 │ ledger, audit    │      (the phone agent does this)│
                                     └──────────────────┘
 ```
 
@@ -106,8 +106,8 @@ URL — URLs land in access logs, and that's how this design usually dies.
 | Step | Link-first (default) | Typed code (fallback) |
 | --- | --- | --- |
 | Skill runs `pair.py --start` | server returns `{code, url, expires_in}` | same |
-| Cubbie texts | the link | — |
-| Student | taps it, already signed in on their phone, taps **Approve** | reads the code on our website, types it to Cubbie |
+| the phone agent texts | the link | — |
+| Student | taps it, already signed in on their phone, taps **Approve** | reads the code on our website, types it to the phone agent |
 | Skill runs `pair.py --finish --code …` | code → token | same |
 | Secret typed by a human? | never | the code, 5-minute TTL, single use |
 
@@ -126,7 +126,7 @@ pairings       (id, user_id, agent_id, token_hash, label,
 pairing_codes  (code_hash, user_id, kind, expires_at, used_at)  -- kind: 'link' | 'typed'
 ```
 
-- `agent_id` — minted at pairing, returned beside the token. Distinguishes *this* Cubbie from a reinstall, and lets
+- `agent_id` — minted at pairing, returned beside the token. Distinguishes *this* the phone agent from a reinstall, and lets
   one student hold a phone pairing and a laptop pairing separately.
 - `last_seen_at` — bumped on every `/inbox` poll. Our liveness signal, and the health metric for the demo.
 - `revoked_at` — set, never deleted, so the audit trail survives.
@@ -182,13 +182,13 @@ HOME persists across restarts and reinstalls: pair once, never again.
 | Failure | Handling |
 | --- | --- |
 | Revoked token still used | `401` with a body the Skill turns into one line: "your link to Study Match expired — reconnect?" Never retry silently |
-| Two Cubbies, one user | Allowed, told apart by `agent_id`, capped at 3 so a stuck reinstall can't leak pairings |
+| Two the phone agents, one user | Allowed, told apart by `agent_id`, capped at 3 so a stuck reinstall can't leak pairings |
 | Code guessed in its TTL | 40 bits, 5-minute TTL, single use, rate-limited `/pair/finish`. Forwarding is the real risk, not guessing |
 | Token leaked into a log | Only ever in the header; never in a query string, never in a message body |
 
 ### Why conversational consent is enough
 
-The student says "share X", Cubbie shares X. The server cannot verify that utterance, so don't build as if it can. The
+The student says "share X", the phone agent shares X. The server cannot verify that utterance, so don't build as if it can. The
 real protection is **schema shape** — accept only a fixed, narrow payload:
 
 ```json
@@ -199,7 +199,7 @@ No free-text field, no arbitrary blob. Even a misbehaving client can then only l
 only the liar — instead of pushing a transcript, a grade or an email address into our database. That is a much better
 guarantee than a checkbox, and it's one line of Pydantic.
 
-**Never key identity on:** a phone number (Cubbie doesn't expose it), an email typed in chat (spoofable, and it lands in
+**Never key identity on:** a phone number (the phone agent doesn't expose it), an email typed in chat (spoofable, and it lands in
 the transcript), or anything ambient (there is nothing ambient).
 
 ## Protocol
@@ -282,9 +282,9 @@ study-match/
 │   ├── auth.py           token hash lookup, revocation, rate limits
 │   ├── match.py          the criteria, server-side and swappable
 │   └── schema.py         the narrow Pydantic payloads (no free text)
-├── skill/                the Cubbie Skill, installed per student
+├── skill/                the phone-agent Skill, installed per student
 │   ├── SKILL.md
-│   ├── cubbie.yaml       network.runtime + the login command
+│   ├── phone agent.yaml       network.runtime + the login command
 │   └── scripts/
 │       ├── pair.py       --start / --finish / --forget
 │       └── bus.py        --poll / --request / --offer / --confirm / --revoke
@@ -297,9 +297,9 @@ study-match/
 **Deliberate cuts:** no room booking, no calendar writes, no LLM in the loop. The interesting thing is the negotiation
 and the consent; every hour on bookings is an hour not spent making case 2 and 3 work.
 
-**Cubbie specifics that matter:** declare the host in `cubbie.yaml` under `network.runtime` (HTTPS 443, hostname not
-IP). The Skill has Cubbie read Canvas and the calendar itself and pass only bands and windows to `bus.py` — scripts
-cannot call Cubbie's abilities, so the data has to arrive as arguments or a file.
+**the phone agent specifics that matter:** declare the host in `phone agent.yaml` under `network.runtime` (HTTPS 443, hostname not
+IP). The Skill has the phone agent read Canvas and the calendar itself and pass only bands and windows to `bus.py` — scripts
+cannot call the phone agent's abilities, so the data has to arrive as arguments or a file.
 
 ## Demo video (~100 seconds)
 
@@ -347,5 +347,5 @@ considered rather than slow.
 2. `auth.py` right: hashed tokens, revocation, `RETURNING` single-use codes, rate limit.
 3. `bus.py` + `match.py`: case 1 end-to-end through the server.
 4. Cases 2 and 3 scripted in `demo/scenario.py`.
-5. Skill installed on two real Cubbies; check-ins set twice a day; film.
+5. Skill installed on two real the phone agents; check-ins set twice a day; film.
 6. Submit with the repo. A website only if there's time to spare.

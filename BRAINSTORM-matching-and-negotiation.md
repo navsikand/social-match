@@ -138,7 +138,7 @@ enforcement, and a privacy class**.
 
 ## 2.1 Principles (these are the ones I'd defend)
 
-1. **The agent parses, the server enforces.** Cubbie turns conversation into a *typed* constraint; it never
+1. **The agent parses, the server enforces.** the phone agent turns conversation into a *typed* constraint; it never
    sends the sentence. Same allowlist philosophy as everything else: unknown keys are rejected with 422.
 2. **A parsed constraint is confirmed back before it becomes binding.** The agent echoes it — *"under $20 per
    person, all week — right?"* — and the constraint carries `confirmed_at`. Same honesty as
@@ -197,7 +197,7 @@ impossible problem).
 
 ## 2.5 First, a correction that shapes everything
 
-Your description has two agents "running off" and talking to each other. **They can't.** Cubbie cannot be
+Your description has two agents "running off" and talking to each other. **They can't.** the phone agent cannot be
 called from outside (no webhook, no inbound) — we established this early and it hasn't changed. So the loop is
 not live chat between agents; it is a **server-side state machine** that each side *feeds* and *reads* at poll
 time:

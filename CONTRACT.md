@@ -66,7 +66,7 @@ Use `uv run pytest`, never `pytest`. Do not run `uv sync`/`uv add`/`uv lock` —
   (user, kind); a new version supersedes the old (write old `withdrawn_at`, insert new row, version+1).
 - `consent_log(id, user_id_hash, action, scope, detail_json, created_at, purge_after NULL)`.
 - `availability(user_id PK, written_by_agent_id, payload_hash, observed_at, expires_at, source IN
-  ('student','cubbie_computed'))` + `availability_windows(user_id, starts_at, ends_at, tz)` (cascade on user_id).
+  ('student','agent_computed'))` + `availability_windows(user_id, starts_at, ends_at, tz)` (cascade on user_id).
 - `hobby_tags(user_id, tag)` closed vocab (§5).
 - `candidates(id, user_a, user_b, score, reasons_json, created_at, expires_at, state IN
   ('open','declined','voided','hidden','matched','closed'))`; one open row per unordered user pair.
@@ -113,7 +113,7 @@ as `StatePayload`. Exact shape:
   "windows": [ {"start": "2026-10-29T19:00", "end": "2026-10-29T21:00", "tz": "America/Los_Angeles"} ],  // 0..20
   "tags": ["climbing", "live_music"],      // 0..5, from TAG_VOCAB exactly, closed
   "wants": ["hangout", "event"],           // subset of hangout|event
-  "free_time": {"source": "student"} | {"source": "cubbie_computed", "student_confirmed_at": "2026-10-24T09:10:00Z"},
+  "free_time": {"source": "student"} | {"source": "agent_computed", "student_confirmed_at": "2026-10-24T09:10:00Z"},
   "consent": {"matching": true, "publication": {"tier": "card+name"}},  // tier: card | card+name
   // Pairing signals (Track 2), all optional, replaced on every post:
   "events": [ {"url": "https://careers.asu.example.edu/fall-fair", "start": "2026-10-30T10:00",
@@ -126,7 +126,7 @@ as `StatePayload`. Exact shape:
 Validation (422 `payload_forbidden` w/ detail on violation):
 - unknown keys anywhere → 422; windows: ≤20; each start<end; duration ≤8h; within next 30 days; `tz` must load via
   `zoneinfo.ZoneInfo`; tags ⊆ TAG_VOCAB and ≤5 (dedup ok); wants ⊆ {hangout,event}.
-- `free_time.source == "cubbie_computed"` REQUIRES `student_confirmed_at` (client-supplied acknowledgement:
+- `free_time.source == "agent_computed"` REQUIRES `student_confirmed_at` (client-supplied acknowledgement:
   provenance, not proof — never call it verification).
 - `consent.matching false` is valid: store nothing but a consent_log entry.
 - `events[]` (server/events.py): `extra="forbid"`; `url` passes the same checks as an activity link and is stored
@@ -240,7 +240,7 @@ side hasn't declined: card_url + ids. P1d builds the page from this endpoint sha
 
 `GET /api/inbox` (bearer): `?since=<seq>` default 0. Bump `last_seen_at`. In one read: all items seq > since for
 user, ordered; response `{"items": [{"seq": n, "kind": "...", "payload": {...}, "created_at": iso}], "now": iso}`.
-`payload` ALWAYS includes `"message"` (the exact text Cubbie reads) and `"card_url"` when relevant.
+`payload` ALWAYS includes `"message"` (the exact text the phone agent reads) and `"card_url"` when relevant.
 
 Exact message texts (compose via `wording.label` so names obey grants; these strings are the contract):
 
@@ -297,15 +297,15 @@ Session cookie `smsession` (itsdangerous, `server/sessions.py` is FROZEN). Pages
 Tests you own: register/login/logout flow, invite code 403, attestation 403, settings grant toggle upserts correctly
 (check grants table), unauthenticated access to settings API → 401, duplicate email → 409.
 
-## 12. Cubbie skill (P1c)
+## 12. the phone-agent skill (P1c)
 
 `skill/` package, stdlib only (no third-party imports, no uv):
 
-- `skill/cubbie.yaml` — REMOVED post-final-gate (2026-10-25): the kit's validator itself warns "cubbie.yaml is not
-  needed and Cubbie ignores it", so the file shipped only as self-documentation and is now gone; `SKILL.md` is the
+- `skill/phone agent.yaml` — REMOVED post-final-gate (2026-10-25): the kit's validator itself warns "phone agent.yaml is not
+  needed and the phone agent ignores it", so the file shipped only as self-documentation and is now gone; `SKILL.md` is the
   operative instruction file. The historical spec text below is kept for provenance
-  `/home/nav/active-code/devhacks3/cubbie-hackathon-kit/skills/cubbie-skill-creator/references/cubbie-capabilities.md`,
-  `cubbie-auth.md`, and `schemas.md`; mirror the structure/fields the references document (network host declaration
+  `/home/nav/active-code/devhacks3/the platform's own capability docs`,
+  `auth.md`, and `schemas.md`; mirror the structure/fields the references document (network host declaration
   pointing at `http://localhost:8000` as the default server, invoked commands, entry points for
   `scripts/pair.py` and `scripts/bus.py`). If references conflict, document the conflict in your report and follow
   the more conservative reading.
@@ -319,7 +319,7 @@ Tests you own: register/login/logout flow, invite code 403, attestation 403, set
   (POST .../api/revoke is session-web-only**; NOTE the revoke is web-session-only — for the skill print instruct
   text and exit code 2; do NOT invent a bearer revoke path), `--whoami`. `auth.json` shared with pair.py. Stdlib
   `urllib.request` only.
-- `skill/SKILL.md` — instructions oriented to the Cubbie agent: when triggered, poll inbox; how to compute free
+- `skill/SKILL.md` — instructions oriented to the agent: when triggered, poll inbox; how to compute free
   windows from the student's calendar WITHOUT ever copying event titles (delete titles, keep ranges — a redaction
   step: ranges and tags only), build payload JSON per CONTRACT §5, ask the student BEFORE sending
   (student_confirmed_at = that moment), then `bus.py --send-state`; show messages from `--poll` verbatim.
@@ -333,7 +333,7 @@ Tests you own: register/login/logout flow, invite code 403, attestation 403, set
   session 401; rotate invalidates bearer after grace; forget revokes + removes only that agent's availability;
   unknown vs revoked token distinct 401 bodies.
 - P1b: 422 on unknown top-level key; 422 on unknown window key; ≤20 windows; 8h bound; bad tz; free-text tag; 6
-  tags; wants whitelist; cubbie_computed without ack → 422; happy path writes availability+windows+tags and
+  tags; wants whitelist; agent_computed without ack → 422; happy path writes availability+windows+tags and
   grants; changed flag flips only on real change; THE THERAPY TEST: build payload with storage objects carrying
   `"Therapy — Dr. Ruiz"` and POST it (calling /api/state with extra field `calendar_titles`), assert 422 AND
   assert no accepted request body contains `b"Therapy"`.
@@ -360,7 +360,7 @@ Tests you own: register/login/logout flow, invite code 403, attestation 403, set
 in-process; `--live` uses httpx against a running uvicorn for filming). Twelve scripted, asserted beats:
 
 1. Ava registers (card+name), Ben registers (card). pair both via API; print link codes.
-2. Ava Cubbie-path state (cubbie_computed + ack), Ben student-path state — same window Thu 19–21.
+2. Ava agent-path state (agent_computed + ack), Ben student-path state — same window Thu 19–21.
 3. Matching creates candidate+proposal; assert the ASYMMETRY in inbox texts: the message to Ava is about Ben
    (pseudonym, because Ben granted only `card`); the message to Ben is about Ava (display name, `card+name`).
 5. Ava right-swipes v1. Ben inbox: "confirmed — confirm your side" containing Ava name.
@@ -388,7 +388,7 @@ prevention, E2E email, moderation UI. Deferred items stay absent from code, not 
 - 18+ is self-attestation, not age verification.
 - Activity offers (Track 2): an offer is a tag from the closed vocabulary plus an https link and nothing else; the link is
   the only free-form string on an offer and it is validated, never fetched (public-event links get the same checks, see below). Reason codes are a closed list of
-  four. The demo's agents are scripted stand-ins: in production the choosing is done by each student's Cubbie following
+  four. The demo's agents are scripted stand-ins: in production the choosing is done by each student's phone agent following
   `social-match/SKILL.md`, and the server cannot verify that an agent applied its student's rules.
 - Agents agreeing on an activity is NOT the plan being on: each student still confirms their own side, and wording must
   never say "it's on" or "you're on" before both have.

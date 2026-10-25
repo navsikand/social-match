@@ -32,7 +32,7 @@ Only these things, and only because matching does not work without them:
   volunteer, other). No event title, sender, location or email text is accepted. We store the link without anything
   after a `?`, because invitation emails often put a personal code there. Another student only ever sees an event if you
   both sent the same link, and then only that link and its category.
-- How busy you are: one whole number from 0 to 3 for the next two weeks. If you use the Cubbie skill it is worked out on
+- How busy you are: one whole number from 0 to 3 for the next two weeks. If you use a phone agent it is worked out on
   your phone from Canvas and your calendar, and no course names or deadlines are sent; in the chat app it is a number you
   give your assistant in words, and it is stored only as that number. Nobody else sees it.
 - Consent log: one row per grant, publication or withdrawal, recording the action, its scope and when it happened.
@@ -41,7 +41,7 @@ Only these things, and only because matching does not work without them:
   (accept, counter, or pass with one of four reason codes: too expensive, too far, not their vibe, the wrong time).
   There is no title, no place name, no price and no sentence in an offer or an answer.
 - Inbox messages: the notifications we compose for you (a new card, a counter-offer, a confirmation, a revocation).
-- A pairing record for each device a legacy Cubbie agent runs on, so that client can authenticate. The token is stored
+- A pairing record for each device a legacy phone agent runs on, so that client can authenticate. The token is stored
   hashed. If you only ever use the web app, there is no pairing record to make.
 - Your chat transcript: the messages you type to your assistant (up to 4,000 characters per turn) and the replies it
   streams back, plus the short system notes the server writes when it applies a change, refuses one, records a conflict,
@@ -74,7 +74,7 @@ and it never enters another student's transcript: the only thing that crosses be
 server-built note of a few fixed fields (decision, tag, link, reason code). A turn that tries to write anything outside
 those fields is discarded whole.
 
-How a calendar becomes free time, in both paths. In the legacy path, your Cubbie agent reads your calendar on your phone,
+How a calendar becomes free time, in both paths. In the legacy path, your phone agent reads your calendar on your phone,
 turns it into time ranges plus tags, asks you before anything leaves, and deletes the rest. In the chat path, you either
 tell your assistant when you are free — and press Confirm on the normalised list it shows you — or you upload an `.ics`
 export on the schedule page. That upload is read once, in memory, by this server: nothing is spooled to disk, and before

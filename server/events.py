@@ -1,6 +1,6 @@
 """Public events a student says they could go to (Track 2 pairing signals).
 
-Cubbie reads the student's inbox and calendar on the phone and sends only the PUBLIC part of an
+An agent reads the student's inbox and calendar on the phone and sends only the PUBLIC part of an
 event: a link to its public page, when it happens, and one category from a closed list. No
 title, no sender, no email text, no location, no RSVP details. Two students whose links
 canonicalise to the same string are going to / considering the same event, which is the
@@ -9,8 +9,8 @@ strongest signal the matcher gets.
 The link is the one free-form string here, so it gets the same hard validation as activity
 links (https only, real domain, no credentials, no fragment) and one more rule: everything
 after `?` is dropped. Invitation emails often carry a personal RSVP token in the query string,
-and the server has no business storing that. A path can still carry a token; the Skill tells
-Cubbie to send the public page, never a personal invite link, and the student approves the list
+and the server has no business storing that. A path can still carry a token; the client is told
+to send the public page, never a personal invite link, and the student approves the list
 before it leaves the phone. That residual risk is listed in docs/privacy.md.
 """
 from urllib.parse import urlsplit

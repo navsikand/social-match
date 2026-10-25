@@ -105,7 +105,7 @@ def block_salt() -> str:
 
 
 def registration_code() -> str:
-    return os.environ.get("REGISTRATION_CODE", "cubbie2026")
+    return os.environ.get("REGISTRATION_CODE", "socialmatch2026")
 
 
 def rotate_grace_seconds() -> int:

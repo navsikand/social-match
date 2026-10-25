@@ -1,4 +1,0 @@
-cubbie: 1
-# The scripts only talk to the match server. Python standard library only: no packages, no keys.
-network:
-  runtime: ["devhacks.navraj.me"]

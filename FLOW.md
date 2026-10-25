@@ -4,7 +4,7 @@ Track 2 entry: two students' assistants negotiate one real plan, through a serve
 nobody anything they haven't published.
 
 The chat app in this repo is the interface: the student signs in, talks to their own assistant, and keeps the card, the
-swipe and the confirmation on the same site, because those need a signed-in session. The Cubbie skill is the
+swipe and the confirmation on the same site, because those need a signed-in session. A phone-agent client would be the
 **legacy / alternate client** — it reads the calendar on the phone and POSTs the same redacted payload, and its
 endpoints and pairing flow are unchanged. Where the two paths differ, this document says so.
 
@@ -12,18 +12,15 @@ Where this document and `PLAN.md` disagree, this one wins: it is newer. `PLAN.md
 and `/inbox`. `PLAN-chat-frontend.md` (approved) wins over this file for the chat app: §1c, §2 (delegation), §7 (chat
 writes), §10 (chat tables) and §12 (new demo beats) are reconciled to it.
 
-## One open question, stated up front
+## The legacy path, in one paragraph
 
-Whether a Cubbie Skill may send **calendar-derived** availability to a host that is not on Cubbie's sub-processor list.
-Cubbie's Privacy Policy restricts transfers to its listed sub-processors, and our server is not one of them. This is the
-**legacy skill path only**: the chat app takes windows you type, or an `.ics` you upload yourself, and neither involves
-Cubbie or a Cubbie-side transfer.
+Earlier drafts shipped a phone-side client (a skill that read the calendar on the device, reduced it to free-time
+ranges and POSTed a redacted payload). **That client is no longer part of this repo.** What remains is the server
+contract it used — the same allowlisted payload, the same pairing codes, the same consent grants — so a third-party
+agent can still talk to this broker, and so the design decisions below stay documented.
 
-Cubbie computes free time locally, reduces it to ranges, and reads those back to the student before anything leaves.
-That reduces what is exposed and puts the student in control of the decision. It does **not** change who performs the
-transfer, and it is **not** an exception to the policy — nothing in the Terms or the Privacy Policy says a student's
-instruction overrides the sub-processor restriction. The gate stands: **ask the organizers on Discord before shipping
-calendar-derived availability.** Until then the demo runs on synthetic fixtures.
+Everything the chat app does, it does through that same contract: a validated write, a preview, a human Confirm.
+Where this document describes the legacy path, read it as the wire contract, not as shipped client code.
 
 ---
 
@@ -32,7 +29,7 @@ calendar-derived availability.** Until then the demo runs on synthetic fixtures.
 ```text
  ┌─ 0. PRECONDITION — every invocation, not once in a linear script ─────────────┐
  │  Paired? token valid? If not: pair (PLAN.md › Auth mapping).                  │
- │  Nothing can wake a student's Cubbie from outside. Everything below is pull.  │
+ │  Nothing can wake a student's phone agent from outside. Everything below is pull.  │
  └──────────────────────────────────────────────────────────────────────────────┘
         │
         ▼
@@ -46,7 +43,7 @@ calendar-derived availability.** Until then the demo runs on synthetic fixtures.
  3. State check   GET /me → expired rows are treated as void and swept. Window is
         │          STATE_TTL_DAYS (default 7).
         ▼
- 4. Collect       Cubbie (the legacy client) works out the free time itself: Canvas deadlines, class
+ 4. Collect       the legacy client works out the free time itself: Canvas deadlines, class
         │          schedule, and the free-time script it already ships. Then it
         │          reads the result back before anything leaves — "you're free
         │          Thu 7-9 and Sat 6-11, and I've got climbing + live music.
@@ -81,18 +78,18 @@ calendar-derived availability.** Until then the demo runs on synthetic fixtures.
 
 ## 1b. The loop between the two clocks (legacy client)
 
-The link in step 9 is not decoration — it is how a decision gets **back into Cubbie**, which cannot be called from
+The link in step 9 is not decoration — it is how a decision gets **back into the phone agent**, which cannot be called from
 outside.
 
 ```text
-our server ──► student's Cubbie ──► text with name + link ──► tap ──► our website (signed in)
+our server ──► student's phone agent ──► text with name + link ──► tap ──► our website (signed in)
      ▲                                                                      │
      │◄──── POST /swipes {candidate_id, proposal_version, direction} ─────────┘
      │
-     └──► queued into the OTHER student's /inbox ──► their next Cubbie poll
+     └──► queued into the OTHER student's /inbox ──► their next phone-agent poll
 ```
 
-The website never pushes to Cubbie. It writes a row; the other agent reads it when it next polls. That is the only
+The website never pushes to the phone agent. It writes a row; the other agent reads it when it next polls. That is the only
 direction the integration can run, and it is why step 11 is a state machine rather than a message.
 
 **A right swipe is a version-bound confirmation, not a separate thing.** It carries the `proposal_version` the card was
@@ -107,7 +104,7 @@ phone on their next check-in. Say that out loud rather than implying realtime.
 
 ## 1c. The chat path, which is the default now
 
-The same server, with the student talking to their own assistant instead of to Cubbie:
+The same server, with the student talking to their own assistant instead of to the phone agent:
 
 ```text
 1. Sign in     /chat. No pairing, no phone. Disabled banner if the deployment has no AI_API_URL.
@@ -211,7 +208,7 @@ re-approval, not a silent republication.
 
 | Operation | Student says | Deletes | Keeps |
 | --- | --- | --- | --- |
-| **Revoke agent** | "disconnect this Cubbie" | this pairing's token; availability rows this agent wrote | other pairings; the account and its grants |
+| **Revoke agent** | "disconnect this the phone agent" | this pairing's token; availability rows this agent wrote | other pairings; the account and its grants |
 | **Leave matching** | "stop matching me" | matching grant; live availability; candidates for and against them; open proposals; served cards and any existing match's discovery state | account and publication grants, inert without matching |
 | **Clear chat** | "clear my history" | your chat transcript, and any pending preview | the rate-limit rows — clearing history is a user right, not a way to buy a fresh turn allowance |
 | **Delete account** | "delete everything" | account row, profile, card, all grants, availability, windows, tags, swipes, candidates, matches, proposals, pairings, the chat transcript, pending previews, chat turn rows, and every `consent_log` row whose payload is personal | a signed-deletion record; pseudonymous `blocks`; audit rows stripped to `{hash, action, timestamp}` |
@@ -248,7 +245,7 @@ Three details that have to be true rather than claimed:
   read treats an expired `availability` row and everything derived from it as void immediately, whether or not a sweep
   has run.
 - **Cron materialises it.** An hourly server job deletes expired rows and stamps derived candidates and proposals
-  `voided`. A server cron is fine; it just cannot wake a Cubbie. The two facts are different.
+  `voided`. A server cron is fine; it just cannot wake a phone agent. The two facts are different.
 - **Explicit deletion voids in the same transaction** that deletes the availability row.
 - **The promise is testable:** "we never use, serve or match data older than `STATE_TTL_DAYS`, and delete it no later
   than the next sweep." Not "we delete at exactly 7 days", which nothing can guarantee.
@@ -309,7 +306,7 @@ A trusted Skill is not a security boundary, so the claim is about what the serve
   "windows": [{"start": "2026-10-29T19:00", "end": "2026-10-29T21:00", "tz": "America/Los_Angeles"}],
   "tags": ["climbing", "live_music", "matcha"],  // free text, max 8; matcher canonicalises
   "wants": ["hangout", "event"],
-  "free_time": {"source": "cubbie_computed", "student_confirmed_at": "2026-10-24T09:10:00Z"},
+  "free_time": {"source": "agent_computed", "student_confirmed_at": "2026-10-24T09:10:00Z"},
   "consent": {"matching": true, "publication": {"tier": "card+name", "version": 3}}
 }
 ```
@@ -379,11 +376,11 @@ and kept here so the answer exists if a judge asks.
 | --- | --- | --- |
 | Privacy › Limited Use | *"We do not sell Google user data, and we do not transfer it to others except to the sub-processors listed below acting on our instructions, to comply with applicable law, or as part of a merger or acquisition…"* | We are not listed. **Open** — see the top of this document |
 | Privacy › Sharing | *"We share personal data only with service providers who process it on our behalf, with affiliates, in connection with a business transfer, or where required by law."* | Our server is outside that list |
-| Terms › Your Content | The licence runs to Cubbie's sub-processors, *"solely to operate the Service"* | Cubbie's licence is not our permission; the student's instruction is |
+| Terms › Your Content | The licence runs to the phone agent's sub-processors, *"solely to operate the Service"* | the phone agent's licence is not our permission; the student's instruction is |
 | Terms › Eligibility | *"You must be at least 16 years old"* | Our discovery gate at 18 is a **voluntary product restriction**, stricter than required, and labelled as ours |
-| Terms › Acceptable Use | No account sharing; no scraping; no circumventing rate limits | One pairing per agent; integration only through the Skill; no calls to Cubbie internals |
-| Terms › Acceptable Use | *"Resell the Service, or use it to build a competing product, without our written permission"* | We are a Skill plus our own site, not a Cubbie competitor. Conduct settles this, not branding |
-| SMS Terms | Consent covers requested one-time passcodes | Never reused. Our notifications travel through the student's own Cubbie check-in |
+| Terms › Acceptable Use | No account sharing; no scraping; no circumventing rate limits | One pairing per agent; integration only through the Skill; no calls to the phone agent internals |
+| Terms › Acceptable Use | *"Resell the Service, or use it to build a competing product, without our written permission"* | We are a Skill plus our own site, not a phone agent competitor. Conduct settles this, not branding |
+| SMS Terms | Consent covers requested one-time passcodes | Never reused. Our notifications travel through the student's own the phone agent check-in |
 
 ### Our own design measures, which are not compliance certificates
 
@@ -397,7 +394,7 @@ and kept here so the answer exists if a judge asks.
 
 ### Documents we must write
 
-Cubbie's terms describe Cubbie. Every question that matters in the demo — who can see my schedule, who can see my
+the phone agent's terms describe the phone agent. Every question that matters in the demo — who can see my schedule, who can see my
 name, how do I get out — is answered by **our** Privacy Policy and **our** ToS. Two pages, plain language, and a
 working delete button.
 
@@ -416,7 +413,7 @@ grants       (id, user_id, kind, tier, version, fields_json, audience,
 consent_log  (id, user_id_hash, action, scope, detail_json, created_at)
 
 availability (user_id, written_by_agent_id, payload_hash, observed_at,
-              expires_at, source)                     -- source: 'student' | 'cubbie_computed'
+              expires_at, source)                     -- source: 'student' | 'agent_computed'
 availability_windows (user_id, starts_at, ends_at, tz)
 hobby_tags   (user_id, tag)                           -- canonical vocabulary (scored + shown)
 interest_raw  (user_id, raw, canonical)               -- the student's own words; never shown
@@ -436,7 +433,7 @@ chat_turns    (id, user_id, kind, ref, at)               -- rate rows; kind 'cha
 ```
 
 - **Availability is keyed per user but records the writing agent**, so "revoke this agent" means something. Newest
-  observation wins; `source` says whether Cubbie computed it or the student typed it.
+  observation wins; `source` says whether the phone agent computed it or the student typed it.
 - **The chat tables have their own clocks.** `chat_messages` holds the student's text, the assistant's text and
   server-templated notes; the sweep purges rows older than `AI_TTL_DAYS` (7), and account deletion cascades all three
   chat tables in the existing transaction. `chat_pending` is at most one row per user with a 10-minute TTL, deleted on
@@ -470,7 +467,7 @@ chat_turns    (id, user_id, kind, ref, at)               -- rate rows; kind 'cha
 | Time | Shot |
 | --- | --- |
 | 0:00 | Sunday check-in on Ava's phone. She says yes to planning |
-| 0:10 | Cubbie reads her week back: "free Thu 7-9 and Sat 6-11", plus her two hobbies — then asks before sharing |
+| 0:10 | the phone agent reads her week back: "free Thu 7-9 and Sat 6-11", plus her two hobbies — then asks before sharing |
 | 0:25 | **The request body on screen, byte for byte.** Two ranges, two tags, one confirmation timestamp, no titles |
 | 0:40 | Server log: `matched: shared tag=climbing, overlap 120min` — a reason, not a score |
 | 0:55 | Ava's phone: "Ben's up for Thursday 7-9 — here's who" with the link |
@@ -506,9 +503,9 @@ closing time, read live with `python3 scripts/hackathon.py status`. Don't plan t
 
 ## 13. Open questions
 
-1. **Calendar-derived availability** needs written confirmation from the Cubbie organizers before it ships. Until then,
-   the demo uses synthetic fixtures and availability is labelled `source: 'cubbie_computed'` with a recorded student
-   confirmation. This is the **legacy skill path only**: typed windows and a self-uploaded `.ics` never involve Cubbie,
+1. **Calendar-derived availability** needs written confirmation from the phone agent organizers before it ships. Until then,
+   the demo uses synthetic fixtures and availability is labelled `source: 'agent_computed'` with a recorded student
+   confirmation. This is the **legacy skill path only**: typed windows and a self-uploaded `.ics` never involve the phone agent,
    and the chat deployment does not depend on that gate.
 2. **Does discovery survive at all?** It doubles the policy surface for a feature the judges didn't ask for. Keep the
    invite-only version for the demo; put public profiles on the "next" slide.

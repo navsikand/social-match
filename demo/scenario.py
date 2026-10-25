@@ -188,7 +188,7 @@ class Demo:
         self.b = backend
         self.verbose = verbose
         self.run_id = secrets.token_hex(3)
-        self.reg_code = os.environ.get("REGISTRATION_CODE", "cubbie2026")
+        self.reg_code = os.environ.get("REGISTRATION_CODE", "socialmatch2026")
         self.u: dict[str, dict] = {}
         self.counters = {"windows": 0, "tags": 0, "acks": 0, "states": 0, "offers": 0, "answers": 0, "events": 0}
         self.wire: list[dict] = []  # every agent-negotiation body we POST, so beat 13 can audit it
@@ -281,7 +281,7 @@ class Demo:
         )
 
     def pair(self, key: str) -> dict:
-        label = f"cubbie-{self.name(key).lower()}"
+        label = f"sm-{self.name(key).lower()}"
         r = self.anon().post("/api/pair/start", json={"label": label})
         check(r.status_code == 201, f"POST /api/pair/start → {r.status_code} {r.text}")
         started = r.json()
@@ -322,7 +322,7 @@ class Demo:
             "free_time": {"source": source},
             "consent": {"matching": True, "publication": {"tier": tier}},
         }
-        if source == "cubbie_computed":
+        if source == "agent_computed":
             payload["free_time"]["student_confirmed_at"] = ack or utc_now()
             self.counters["acks"] += 1
         if extra:
@@ -448,12 +448,12 @@ def beat_3_state(d: Demo) -> None:
         "ava",
         windows=[d.thu],
         tags=["climbing", "live_music"],
-        source="cubbie_computed",
+        source="agent_computed",
         tier="card+name",
         ack=ack,
     )
     d.say(
-        f"  Ava  (Cubbie path) free_time=cubbie_computed, student_confirmed_at={ack}"
+        f"  Ava  (agent path) free_time=agent_computed, student_confirmed_at={ack}"
         "  [provenance, not proof]",
         f"       → 201 changed={r.json()['changed']} expires_at={r.json()['expires_at']}",
     )
@@ -782,7 +782,7 @@ def beat_11_no_overlap_block_report(d: Demo) -> None:
         )
     d.say(
         "  Gus free Mon 09:00–10:00, Hana free Wed 09:00–10:00 → zero candidates, zero matches",
-        '  Cubbie tells Hana, verbatim: "No time that works this week - keep the request open?"',
+        '  The agent tells Hana, verbatim: "No time that works this week - keep the request open?"',
     )
 
     # ---- (b) block, both directions ----------------------------------------
@@ -901,7 +901,7 @@ def beat_12_payload(d: Demo) -> None:
 
 # ---- beat 13: Track 2 — two agents settle WHAT to do ----------------------------------------------
 #
-# The two "agents" below are scripted stand-ins. In production each is a student's Cubbie following
+# The two "agents" below are scripted stand-ins. In production each is a student's assistant following
 # skill/SKILL.md Step 6: it runs a web search for options and applies the student's private rules.
 # What this beat proves is the SERVER side of that conversation: what is allowed to cross, the
 # round structure, and that the students are only asked once the agents agree.
@@ -1307,7 +1307,7 @@ def prepare_env() -> tuple[str, str]:
     os.environ["SOCIAL_MATCH_DB"] = db_path
     os.environ.setdefault("SESSION_SECRET", "demo-session-secret-not-for-production")
     os.environ.setdefault("BLOCK_SALT", "demo-block-salt-not-for-production")
-    os.environ.setdefault("REGISTRATION_CODE", "cubbie2026")
+    os.environ.setdefault("REGISTRATION_CODE", "socialmatch2026")
     os.environ.setdefault("BASE_URL", "http://localhost:8000")
     os.environ.setdefault("ENCODER_ENABLED", "0")  # offline and reproducible; the live server uses the encoder
     # Keep the output clean: importing TestClient emits a Starlette/httpx UserWarning.

@@ -213,14 +213,14 @@ def test_wants_whitelist(client, student):
     assert_forbidden(post(client, token, make_payload(wants=["hangout", "study_session"])))
 
 
-def test_cubbie_computed_requires_ack(client, student):
+def test_agent_computed_requires_ack(client, student):
     _, token, _ = student
-    assert_forbidden(post(client, token, make_payload(free_time={"source": "cubbie_computed"})))
+    assert_forbidden(post(client, token, make_payload(free_time={"source": "agent_computed"})))
     ok = make_payload(
-        free_time={"source": "cubbie_computed", "student_confirmed_at": "2026-10-24T09:10:00Z"}
+        free_time={"source": "agent_computed", "student_confirmed_at": "2026-10-24T09:10:00Z"}
     )
     assert post(client, token, ok).status_code == 201
-    assert rows("SELECT source FROM availability")[0]["source"] == "cubbie_computed"
+    assert rows("SELECT source FROM availability")[0]["source"] == "agent_computed"
 
 
 def test_non_dict_and_bad_json_bodies(client, student):

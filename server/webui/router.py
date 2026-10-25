@@ -21,7 +21,6 @@ router = APIRouter(tags=["webui"])
 _HERE = os.path.dirname(os.path.abspath(__file__))
 TEMPLATES_DIR = os.path.join(_HERE, "templates")
 DOCS_DIR = os.path.normpath(os.path.join(_HERE, "..", "..", "docs"))
-SKILL_DIR = os.path.normpath(os.path.join(_HERE, "..", "..", "skill"))
 
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
@@ -457,21 +456,3 @@ def terms_page(request: Request):
         "terms.html",
     )
 
-
-@router.get("/skill", response_class=HTMLResponse)
-def skill_page(request: Request):
-    """Dashboard link target: the Cubbie skill instructions, when the skill package exists."""
-    body = _read_doc(os.path.join(SKILL_DIR, "SKILL.md"))
-    if body is None:
-        body = (
-            "Cubbie skill instructions\n"
-            "=========================\n\n"
-            "The skill package ships alongside the server. Once installed, Cubbie can:\n\n"
-            "  1. pair with this account and poll your inbox,\n"
-            "  2. read your calendar and reduce events to free time ranges (titles are never sent),\n"
-            "  3. show you the exact payload before anything is shared.\n\n"
-            "Full instructions are coming with the skill package."
-        )
-    return templates.TemplateResponse(
-        request, "privacy.html", {"title": "Cubbie skill instructions", "content": body, "missing": False}
-    )

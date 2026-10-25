@@ -98,6 +98,23 @@ a:hover { color: var(--ink); }
 }
 .topbar nav a:hover { color: var(--ink); border-bottom-color: var(--violet); }
 
+/* The Chat entry is a real button, not a nav link: `.topbar nav a` was winning on
+   specificity and squashing it to a 0.4rem-padded, underline-on-hover text link.
+   Give it its own box, a fixed comfortable width, and no underline. */
+.topbar nav a.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 6.5rem;
+  min-height: 2.5rem;
+  padding: 0.45rem 1.15rem;
+  border-radius: 999px;
+  border-bottom: 0;
+  color: var(--accent-ink);
+  font-weight: 700;
+  line-height: 1;
+}
+.topbar nav a.button:hover { border-bottom: 0; }
 main { flex: 1; width: 100%; max-width: 60rem; margin: 0 auto; padding: 2rem 1rem 3rem; }
 
 h1, h2, h3 { font-family: var(--font-display); letter-spacing: -0.02em; }

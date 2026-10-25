@@ -15,7 +15,6 @@ The division of labour is the whole idea:
 | **Your assistant** | your agent. It reads your own state, applies changes through the server's validated write path, and — if you delegate — accepts, counters or passes offers against the other student's assistant. |
 | **Our server** | the broker. It validates every write against an allowlist, decides who overlaps whom, runs the five consent grants, feeds the model provider on your behalf, and owns every piece of state and every retention clock. |
 | **The website (same app)** | where the card, the swipe and the confirm live. A confirmation is a signed-in press; no assistant can swipe or confirm for you. |
-| **The Cubbie skill** | the **legacy / alternate client**. Endpoints and the pairing flow are unchanged: it still computes free time on the phone and POSTs a redacted payload. The chat app does the same job without it. |
 
 The product rationale is in `FLOW.md`. The implementation contract, section by section, is `CONTRACT.md` (its §16
 "honesty ledger" is binding on this README and on everything under `docs/`); the chat surfaces are specified in
@@ -30,7 +29,7 @@ uv run uvicorn server.app:app --reload    # http://localhost:8000
 uv run pytest -q                          # 273 tests before the chat lanes, a few seconds
 ```
 
-Then open <http://localhost:8000/register>, enter the invite code (`REGISTRATION_CODE`, default `cubbie2026`), tick the
+Then open <http://localhost:8000/register>, enter the invite code (`REGISTRATION_CODE`, default `socialmatch2026`), tick the
 18+ attestation, and you land on the chat page: talk to your assistant, define your schedule by hand or by `.ics`, and
 the dashboard, card, swipe, matches, settings and legacy inbox pages are all there.
 
@@ -100,32 +99,8 @@ Check the real model without starting the server: `uv run python -m server.encod
 | `server/db.py` | SQLite connection helpers, `utcnow`, `immediate` transactions, `user_hash`. |
 | `server/webui/` | Templates + routes for register, login, chat, schedule, dashboard, card, matches, settings, privacy, terms, pair-approve. |
 | `schema.sql` | Authoritative schema (SQLite), including `chat_messages`, `chat_turns`, `chat_pending`. |
-| `social-match/` | The Cubbie Skill (legacy client): `SKILL.md`, `scripts/pair.py`, `scripts/bus.py`, `payload.example.json`. |
 | `tests/` | The suite (273 before the chat lanes): payload allowlist, matching, public-event signals, activity negotiation, concurrency, pairing, inbox/sweep, web UI, photos, review regressions, and the chat and schedule lanes. |
-| `references/` | Cubbie platform docs used to shape the Skill. |
 | `docs/` | This repo's privacy policy and terms, which the server itself serves at `/privacy` and `/terms`. |
-
-## Installing the Cubbie skill (legacy / alternate client)
-
-A Skill is a folder with a `SKILL.md`. Copy `social-match/` into the student's Cubbie Skill folder and that is the entire
-install — no key to paste, no package to add, standard library only. The endpoints and the pairing flow are unchanged by
-the chat app; a deployment can use both, and what a skill writes lands in the same state the chat reads.
-
-**`social-match/SKILL.md` is the operative instruction file.** It is what the agent reads and follows: the triggers, the
-redaction rules, the exact wording of the consent question, and the "never say *you're on*" wording rule.
-
-`social-match/cubbie.yaml` ships, but **Cubbie ignores it**: the kit's own structure check calls a leftover
-manifest "not needed, ignored", and the kit documents no schema for one. It is self-documentation only — nothing
-depends on it. `SKILL.md` is the operative file, and `SKILL.md` plus `social-match/scripts/` is the whole install.
-
-The Skill's own hard rules, quoted because they are the product:
-
-- **Nothing leaves the phone until the student reads it and says yes**, in their own words, in the same conversation.
-- **Calendar contents never leave the phone** — not titles, not attendees, not locations, not course codes.
-
-The chat path reaches the same guarantee differently: you type your free time (or upload an `.ics` that the server reads
-once in memory), you see a normalised preview, and only the windows you tick are stored. The calendar file is never
-spooled to disk, and titles, locations and attendees are never stored or logged.
 
 ## The five consent grants
 
@@ -183,13 +158,13 @@ passes. An offer is
 have, and the link must be https (`server/offers.py` checks it). An answer is `accept`, `pass` + a reason code, or
 `counter` + a new
 tag and link. Nothing else is accepted (`extra="forbid"`, test `test_extra_fields_rejected_so_no_title_or_place_can_ride_along`).
-The searching is the student's own rules — the legacy client applies them on the phone per `social-match/SKILL.md`
-Step 6, and the chat assistant applies your stated intent; the server only holds the rounds. Until an offer is accepted
+The searching is the student's own rules — a legacy phone client applies them on the device, and the chat
+assistant applies your stated intent; the server only holds the rounds. Until an offer is accepted
 the students cannot confirm (`409 activity_pending`). Negotiation turns are assistant-context only: a typed chat message
 can never emit an offer/accept/counter/pass op, and the apply transaction re-reads the delegation grant, account
 liveness and offer version, so withdrawing delegation mid-turn changes nothing.
 
-**When assistants ask, and when humans press.** In the legacy path `SKILL.md` Step 3 still requires the agent to show
+**When assistants ask, and when humans press.** In the legacy path the contract still requires the agent to show
 the student the exact windows, tags and name choice, and wait for "yes, send it". In the chat path the same gate is a
 pending preview: windows and events do not write until you press **Confirm**, which stamps `free_time.student_confirmed_at`
 (or `events_confirmed_at`) — the click is the provenance. Tags, wants and busy apply immediately when you ask for them.
@@ -201,9 +176,9 @@ on until a second side confirms — the confirmation text says "confirm your sid
 
 These are limits of what we built, stated plainly. `CONTRACT.md` §16 makes keeping them exact a requirement.
 
-1. **The calendar-derived pipeline still awaits organizer confirmation.** The student→phone half of the legacy path is
-   real code (`social-match/`), but that pipeline is demonstrated on synthetic fixtures: the demo posts
-   `cubbie_computed` payloads against fixed windows. The chat path sidesteps the question — you type the time or upload
+1. **The calendar-derived pipeline still awaits organizer confirmation.** The student→phone half of the legacy
+   path is not shipped in this repo, and that pipeline is demonstrated on synthetic fixtures: the demo posts
+   `agent_computed` payloads against fixed windows. The chat path sidesteps the question — you type the time or upload
    your own export — but `student_confirmed_at` remains **provenance, not proof**: it records that the client asserted
    "the student saw and approved this" (or that you clicked Confirm), and the server cannot verify that a human read
    anything. It is validated as an ISO timestamp and stored; it is never treated as verification, and it must never be

@@ -1,7 +1,7 @@
 [project]
 name = "social-match"
 version = "0.1.0"
-description = "Track 2 hackathon build: agent-to-agent social matching (server + Cubbie skill + web)"
+description = "Track 2 hackathon build: agent-to-agent social matching (server + web + chat assistant)"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115",

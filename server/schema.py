@@ -1,8 +1,8 @@
 """Canonical accepted payload for POST /api/state (CONTRACT §5). P1b owns this file.
 
-This module is the allowlist. Everything the Cubbie skill is allowed to send is described
+This module is the allowlist. Everything an agent client is allowed to send is described
 here; anything else (unknown keys at any level, free-text event titles, extra metadata) is
-rejected with 422 `payload_forbidden`. The skill never sends calendar event titles — only
+rejected with 422 `payload_forbidden`. An agent never sends calendar event titles — only
 ranges plus tags — and this schema is the code that makes that a guarantee rather than a
 convention.
 
@@ -131,7 +131,7 @@ class Window(_ForbidExtra):
 
 
 class FreeTime(_ForbidExtra):
-    source: Literal["student", "cubbie_computed"]
+    source: Literal["student", "agent_computed"]
     # PROVENANCE, not proof: the client says "the student saw/approved this". The server
     # cannot verify that a human read anything (CONTRACT §16).
     student_confirmed_at: str | None = None
@@ -149,9 +149,9 @@ class FreeTime(_ForbidExtra):
 
     @model_validator(mode="after")
     def _computed_needs_ack(self) -> "FreeTime":
-        if self.source == "cubbie_computed" and not self.student_confirmed_at:
+        if self.source == "agent_computed" and not self.student_confirmed_at:
             raise ValueError(
-                "free_time.source 'cubbie_computed' requires student_confirmed_at "
+                "free_time.source 'agent_computed' requires student_confirmed_at "
                 "(student acknowledgement of the computed windows)"
             )
         return self

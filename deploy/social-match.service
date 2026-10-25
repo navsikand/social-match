@@ -1,5 +1,5 @@
 [Unit]
-Description=Social Match — Cubbie Track 2 (FastAPI + SQLite)
+Description=Social Match — Track 2 (FastAPI + SQLite)
 Wants=network-online.target
 After=network-online.target
 

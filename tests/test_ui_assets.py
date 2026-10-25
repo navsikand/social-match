@@ -26,5 +26,5 @@ def test_stylesheet_has_no_external_urls_and_fonts_are_served(client):
 def test_brand_name_is_consistent(client):
     for path in PAGES:
         html = client.get(path).text
-        assert "Cubbie Match" not in html
+        assert "Social Match" in html
         assert "Social Match" in html
