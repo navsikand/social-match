@@ -362,8 +362,23 @@ def purge_chat(conn, now: str) -> int:
     removed += conn.execute(
         "DELETE FROM chat_pending WHERE expires_at < ?", (now,)
     ).rowcount
+    # F7: a negotiation row is the CAP COUNTER as well as budget, so it must outlive the rate
+    # window while its target is still actionable — otherwise an unanswered offer resumes
+    # provider retries after every sweep cycle. Exemptions:
+    #   ref='offer:<id>'   that offer still exists and is still 'offered'
+    #   ref='initial:<id>' that candidate is still open/matched and has no offer yet
     removed += conn.execute(
-        "DELETE FROM chat_turns WHERE at < ?",
+        "DELETE FROM chat_turns WHERE at < ?"
+        " AND NOT (kind='negotiation' AND ref IS NOT NULL AND ("
+        "  (ref LIKE 'offer:%' AND EXISTS ("
+        "    SELECT 1 FROM activity_offers o"
+        "    WHERE o.id = CAST(substr(ref, 7) AS INTEGER) AND o.state = 'offered'))"
+        "  OR (ref LIKE 'initial:%' AND EXISTS ("
+        "    SELECT 1 FROM candidates c JOIN proposals p ON p.candidate_id = c.id"
+        "    WHERE c.id = CAST(substr(ref, 9) AS INTEGER)"
+        "      AND c.state IN ('open','matched') AND p.state != 'voided'"
+        "      AND NOT EXISTS (SELECT 1 FROM activity_offers o2 WHERE o2.proposal_id = p.id)))"
+        " ))",
         (_shift(now, minutes=-RATE_WINDOW_MINUTES),),
     ).rowcount
     return removed

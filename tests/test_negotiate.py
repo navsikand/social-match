@@ -466,6 +466,53 @@ def test_autonomy_ceiling_boundary_is_exact(client, monkeypatch):
     assert len(_turn_rows(b)) == negotiate.AUTONOMY_CEILING
 
 
+def test_attempt_cap_survives_the_rate_window_purge(client, monkeypatch):
+    """Gate review P1 #7: the sweep used to delete the ledger rows that ARE the cap."""
+    a, b, cid, pid = _pair()
+    util.grant(b, "delegation")
+    offer_id = _pending_offer(cid, a)
+    monkeypatch.setattr(chat.ai, "stream_reply", provider_error())
+
+    _tick()
+    _tick()
+    assert len(_turn_rows(b)) == 2
+
+    later = "2026-10-24T12:30:00Z"  # past the ten-minute rate window
+    db._FIXED_NOW = later
+    conn = db.connect()
+    try:
+        chat.purge_chat(conn, later)
+        assert len(_turn_rows(b)) == 2, "offer-referenced attempts must survive the purge"
+    finally:
+        conn.close()
+
+    stats = _tick()
+
+    assert stats["answered"] == 0
+    assert len(_turn_rows(b)) == 2, "no third provider attempt after the sweep"
+    assert _contents(b).count(negotiate.MANUAL_NOTE) == 1
+    assert _offer(offer_id)["state"] == "offered"
+
+
+def test_attempt_rows_are_purged_once_the_offer_is_settled(client, monkeypatch):
+    """The exemption is narrow: a settled offer's ledger rows are still swept."""
+    a, b, cid, pid = _pair()
+    util.grant(b, "delegation")
+    offer_id = _pending_offer(cid, a)
+    monkeypatch.setattr(chat.ai, "stream_reply", neg_reply({"op": "accept", "offer_id": offer_id}))
+    _tick()
+    assert len(_turn_rows(b)) == 1
+
+    later = "2026-10-24T12:30:00Z"
+    db._FIXED_NOW = later
+    conn = db.connect()
+    try:
+        chat.purge_chat(conn, later)
+        assert _turn_rows(b) == []
+    finally:
+        conn.close()
+
+
 def test_shared_rate_budget_full_skips_cleanly(client, monkeypatch):
     a, b, cid, pid = _pair()
     util.grant(b, "delegation")
