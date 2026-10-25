@@ -391,6 +391,81 @@ def test_autonomy_ceiling_skips_without_consuming_budget(client, monkeypatch):
     assert _contents(b) == []
 
 
+def test_busy_ticks_do_not_burn_attempts(client, monkeypatch):
+    """Two busy ticks used to exhaust the offer's allowance with ZERO provider calls (F8)."""
+    a, b, cid, pid = _pair()
+    util.grant(b, "delegation")
+    offer_id = _pending_offer(cid, a)
+    monkeypatch.setattr(chat.ai, "stream_reply", provider_error())
+
+    async def scenario():
+        lock = chat.get_user_lock(b)
+        await lock.acquire()  # the student is typing
+        try:
+            return await negotiate.tick_once(), await negotiate.tick_once()
+        finally:
+            lock.release()
+
+    first, second = asyncio.run(scenario())
+
+    assert first == second == {"pending": 1, "answered": 0, "skipped": 1}
+    assert _turn_rows(b) == [], "a busy tick must not reserve budget"
+    assert _contents(b) == [], "a busy tick must not write a note"
+    assert negotiate.MANUAL_NOTE not in _contents(b)
+
+    # The whole allowance survives: the two real attempts still happen afterwards.
+    _tick()
+    _tick()
+    assert len(_turn_rows(b)) == 2
+    assert negotiate.MANUAL_NOTE not in _contents(b)
+    assert _offer(offer_id)["state"] == "offered"
+
+
+def _spend_turns(uid: int, count: int) -> None:
+    """The user's own history for the window: a mix of typed and autonomous turns."""
+    conn = db.connect()
+    try:
+        with db.immediate(conn):
+            for index in range(count):
+                conn.execute(
+                    "INSERT INTO chat_turns (user_id, kind, ref, at) VALUES (?,?,?,?)",
+                    (uid, "chat" if index % 2 else "negotiation", None, db.utcnow()),
+                )
+    finally:
+        conn.close()
+
+
+def test_autonomy_ceiling_counts_typed_turns_too(client, monkeypatch):
+    """PLAN §C2: no autonomous turn once the user has 12 turns in the window, ANY kind (F12)."""
+    a, b, cid, pid = _pair()
+    util.grant(b, "delegation")
+    offer_id = _pending_offer(cid, a)
+    monkeypatch.setattr(chat.ai, "stream_reply", neg_reply({"op": "accept", "offer_id": offer_id}))
+    _spend_turns(b, negotiate.AUTONOMY_CEILING)  # half typed, half autonomous
+
+    stats = _tick()
+
+    assert stats == {"pending": 1, "answered": 0, "skipped": 1}
+    assert len(_turn_rows(b)) == negotiate.AUTONOMY_CEILING, "no row for a ceiling skip"
+    assert _offer(offer_id)["state"] == "offered"
+    assert _contents(b) == []
+
+
+def test_autonomy_ceiling_boundary_is_exact(client, monkeypatch):
+    """One turn short of the ceiling still acts — the count is >=12, not >12."""
+    a, b, cid, pid = _pair()
+    util.grant(b, "delegation")
+    offer_id = _pending_offer(cid, a)
+    monkeypatch.setattr(chat.ai, "stream_reply", neg_reply({"op": "accept", "offer_id": offer_id}))
+    _spend_turns(b, negotiate.AUTONOMY_CEILING - 1)
+
+    stats = _tick()
+
+    assert stats == {"pending": 1, "answered": 1, "skipped": 0}
+    assert _offer(offer_id)["state"] == "accepted"
+    assert len(_turn_rows(b)) == negotiate.AUTONOMY_CEILING
+
+
 def test_shared_rate_budget_full_skips_cleanly(client, monkeypatch):
     a, b, cid, pid = _pair()
     util.grant(b, "delegation")
@@ -424,6 +499,9 @@ def test_lock_busy_skips_cleanly(client, monkeypatch):
     assert stats == {"pending": 1, "answered": 0, "skipped": 1}
     assert _offer(offer_id)["state"] == "offered"
     assert _contents(b) == []
+    # F8: a busy tick is free — no ledger row, so the attempt allowance is untouched.
+    assert _turn_rows(b) == []
+    assert negotiate.MANUAL_NOTE not in _contents(b)
 
 
 def test_chat_disabled_ticks_do_nothing(client, monkeypatch):
