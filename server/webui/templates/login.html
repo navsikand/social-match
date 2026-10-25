@@ -15,7 +15,9 @@
   <section class="auth-main">
     <div class="auth-form">
       <h1>Sign in</h1>
-      <form id="login-form" class="stack" novalidate>
+      <p id="login-notice" class="notice ok" role="status" aria-live="polite"
+         {% if not deleted %}hidden{% endif %}>Your account was deleted.</p>
+      <form id="login-form" class="stack">
         <label>Email
           <input type="email" name="email" id="email" autocomplete="email" required>
         </label>
@@ -23,7 +25,8 @@
           <input type="password" name="password" id="password" autocomplete="current-password" required>
         </label>
         <button class="primary" type="submit">Sign in</button>
-        <p id="login-status" class="notice" hidden></p>
+        <p id="login-status" class="notice" role="status" aria-live="polite"
+           aria-busy="false" hidden></p>
       </form>
       <p class="muted">New here? <a href="/register">Create an account</a>.</p>
     </div>
@@ -37,6 +40,11 @@
   const next = {{ (next or '')|tojson }};
   form.addEventListener("submit", async function (ev) {
     ev.preventDefault();
+    // B2: never fire two sign-in writes from a double tap.
+    const submitBtn = form.querySelector("button[type=submit]");
+    if (submitBtn.disabled) return;
+    submitBtn.disabled = true;
+    let navigating = false;
     show(status, "Signing in…", "info");
     try {
       const out = await postJSON("/api/login", {
@@ -44,12 +52,15 @@
         password: document.getElementById("password").value,
       });
       if (out.res.ok) {
+        navigating = true;
         window.location.href = next && next.charAt(0) === "/" ? next : "/";
         return;
       }
       show(status, out.res.status === 401 ? "Email or password is incorrect." : apiError(out.res, out.data), "error");
     } catch (err) {
       show(status, "Network error — is the server running?", "error");
+    } finally {
+      if (!navigating) submitBtn.disabled = false;
     }
   });
 </script>

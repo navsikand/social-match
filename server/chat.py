@@ -842,10 +842,13 @@ def _store_pending(
 
 
 def _latest_pending(conn, uid: int):
+    """The newest LIVE preview. A row past its TTL is dead: Confirm refuses it anyway, so the
+    read surface must not keep offering it (A9)."""
     return db.one(
         conn,
-        "SELECT * FROM chat_pending WHERE user_id=? ORDER BY id DESC LIMIT 1",
-        (uid,),
+        "SELECT * FROM chat_pending WHERE user_id=? AND expires_at > ?"
+        " ORDER BY id DESC LIMIT 1",
+        (uid, db.utcnow()),
     )
 
 
@@ -1245,7 +1248,15 @@ def chat_history(user=Depends(require_session), conn=Depends(db.get_conn)):
         except Exception:
             stored_payload = {}
         items = stored_payload.get("items")
-        if not isinstance(items, dict):  # a row from before F13 (or a foreign writer)
+        if isinstance(items, list):
+            # A10: an ICS upload stores a flat list; normalise it into the typed sections the
+            # preview card renders, so Chat never shows "This preview has no items".
+            items = (
+                {"windows": [], "events": list(items)}
+                if pending_row["kind"] == "events"
+                else {"windows": list(items), "events": []}
+            )
+        elif not isinstance(items, dict):  # a row from before F13 (or a foreign writer)
             items = {"windows": [], "events": []}
         ops = stored_payload.get("ops") if isinstance(stored_payload.get("ops"), list) else []
         pending = {
@@ -1280,14 +1291,20 @@ async def post_chat(request: Request, user=Depends(require_session), conn=Depend
     bad_origin = _origin_error(request)
     if bad_origin is not None:
         return bad_origin
-    try:
-        reserve_turn(conn, uid, "chat")
-    except ChatRateLimited:
-        return _error(429, "rate_limited", "at most 20 turns per 10 min")
+    # C1: take the per-user lock BEFORE spending a ledger row. A turn_busy 409 must not consume
+    # rate-limit budget for a turn that never runs.
     try:
         lock = await _acquire_turn_lock(uid)
     except TurnBusy:
         return _error(409, "turn_busy", "a turn is already running — wait for it to finish")
+    try:
+        reserve_turn(conn, uid, "chat")
+    except ChatRateLimited:
+        lock.release()
+        return _error(429, "rate_limited", "at most 20 turns per 10 min")
+    except Exception:
+        lock.release()
+        raise
 
     turn = Turn(kind="user", user_text=content)
     return StreamingResponse(

@@ -1245,3 +1245,102 @@ def test_provider_error_becomes_honest_error_event(client, monkeypatch):
         assert any("could not answer" in n for n in notes)
     finally:
         conn.close()
+
+
+# --------------------------------------------------- A9: expired previews are not offered
+
+def _insert_pending(uid: int, kind: str, payload: dict, *, expires_shift_days: int = 1) -> int:
+    conn = db.connect()
+    try:
+        with db.immediate(conn):
+            cursor = conn.execute(
+                "INSERT INTO chat_pending (user_id, kind, payload_json, state_hash, created_at,"
+                " expires_at) VALUES (?,?,?,?,?,?)",
+                (
+                    uid,
+                    kind,
+                    json.dumps(payload),
+                    chat.current_state_hash(conn, uid),
+                    db.utcnow(),
+                    db.utcnow(days=expires_shift_days),
+                ),
+            )
+            return int(cursor.lastrowid or 0)
+    finally:
+        conn.close()
+
+
+def test_history_returns_no_pending_once_the_preview_is_dead(client):
+    uid = _register(client)
+    expired_id = _insert_pending(
+        uid, "windows", {"ops": [], "items": {"windows": [WINDOW_OK], "events": []}},
+        expires_shift_days=-1,
+    )
+
+    hist = client.get("/api/chat/history")
+    assert hist.status_code == 200
+    assert hist.json()["pending"] is None
+
+    conn = db.connect()
+    try:
+        # The row may linger until the sweep, but no read surface offers it any more.
+        assert db.one(conn, "SELECT id FROM chat_pending WHERE id=?", (expired_id,)) is not None
+        assert chat._latest_pending(conn, uid) is None
+    finally:
+        conn.close()
+
+    # Confirm still refuses it (expiry is enforced there too).
+    assert client.post("/api/chat/confirm", json={"id": expired_id}).status_code == 409
+
+
+# ------------------------------------------ A10: list-shaped (ICS) previews become sections
+
+def test_history_normalises_a_list_shaped_ics_preview_and_schedule_confirms_it(client):
+    uid = _register(client)
+    pending_id = _insert_pending(uid, "ics", {"items": [WINDOW_OK], "tz": TZ})
+
+    hist = client.get("/api/chat/history").json()
+    assert hist["pending"]["id"] == pending_id
+    assert hist["pending"]["kind"] == "ics"
+    # A flat list must reach the preview card as typed sections, not as "no items".
+    assert hist["pending"]["items"] == {"windows": [WINDOW_OK], "events": []}
+
+    # Chat routes an ICS Confirm to the schedule surface, which owns the row and the picks.
+    confirm = client.post("/api/schedule/ics/confirm", json={"id": pending_id, "pick": [0]})
+    assert confirm.status_code == 200, confirm.text
+    assert confirm.json()["ok"] is True
+
+    conn = db.connect()
+    try:
+        wins = db.q(conn, "SELECT starts_at, ends_at, tz FROM availability_windows WHERE user_id=?", (uid,))
+        assert len(wins) == 1
+        assert db.one(conn, "SELECT COUNT(*) AS n FROM chat_pending WHERE user_id=?", (uid,))["n"] == 0
+    finally:
+        conn.close()
+
+
+# ----------------------------------------------- C1: a busy turn spends no ledger row
+
+def test_turn_busy_conflict_spends_no_ledger_row(client):
+    uid = _register(client)
+    conn = db.connect()
+    try:
+        before = db.one(conn, "SELECT COUNT(*) AS n FROM chat_turns WHERE user_id=?", (uid,))["n"]
+    finally:
+        conn.close()
+
+    lock = chat.get_user_lock(uid)
+    asyncio.run(lock.acquire())
+    try:
+        r = client.post("/api/chat", json={"content": "hi"})
+        assert r.status_code == 409
+        assert r.json()["error"] == "turn_busy"
+    finally:
+        lock.release()
+
+    conn = db.connect()
+    try:
+        after = db.one(conn, "SELECT COUNT(*) AS n FROM chat_turns WHERE user_id=?", (uid,))["n"]
+    finally:
+        conn.close()
+    assert after == before, "the lock is taken before reserve_turn, so a 409 costs nothing"

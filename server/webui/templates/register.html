@@ -15,7 +15,7 @@
   <section class="auth-main">
     <div class="auth-form">
       <h1>Create your account</h1>
-  <form id="register-form" class="stack" novalidate>
+  <form id="register-form" class="stack">
     <label>Email
       <input type="email" name="email" id="email" autocomplete="email" required>
     </label>
@@ -38,7 +38,8 @@
       I am 18 or older. This is a self-attestation, not age verification.
     </label>
     <button class="primary" type="submit">Create account</button>
-    <p id="register-status" class="notice" hidden></p>
+    <p id="register-status" class="notice" role="status" aria-live="polite"
+       aria-busy="false" hidden></p>
   </form>
   <p class="muted">Already registered? <a href="/login">Sign in</a>.</p>
     </div>
@@ -51,6 +52,11 @@
   const status = document.getElementById("register-status");
   form.addEventListener("submit", async function (ev) {
     ev.preventDefault();
+    // B2: one submit per request — the button stays disabled until navigation completes.
+    const submitBtn = form.querySelector("button[type=submit]");
+    if (submitBtn.disabled) return;
+    submitBtn.disabled = true;
+    let navigating = false;
     show(status, "Creating account…", "info");
     const payload = {
       email: document.getElementById("email").value,
@@ -63,19 +69,16 @@
     try {
       const out = await postJSON("/api/register", payload);
       if (out.res.ok) {
+        navigating = true;
         window.location.href = "/";
         return;
       }
-      const text = apiError(out.res, out.data);
-      if ((out.data && out.data.detail && out.data.detail.error) === "invite_required") {
-        show(status, "That registration code is not valid.", "error");
-      } else if ((out.data && out.data.detail && out.data.detail.error) === "attest_required") {
-        show(status, "You must confirm you are 18 or older.", "error");
-      } else {
-        show(status, text, "error");
-      }
+      // C4: apiError maps invite_required / attest_required / email_taken to plain sentences.
+      show(status, apiError(out.res, out.data), "error");
     } catch (err) {
       show(status, "Network error — is the server running?", "error");
+    } finally {
+      if (!navigating) submitBtn.disabled = false;
     }
   });
 </script>

@@ -202,6 +202,9 @@ def register(body: RegisterBody, response: Response, conn=Depends(db.get_conn)):
     display_name = body.display_name.strip()
     if not email or not body.password or not display_name:
         raise db.http_error(422, "payload_forbidden", "email, password and display name are required")
+    # D7: the 8-character rule is enforced here as well as in the browser (minlength=8).
+    if len(body.password) < 8:
+        raise db.http_error(422, "payload_forbidden", "password must be at least 8 characters")
 
     avatar_id = body.avatar_id if body.avatar_id in _AVATARS else 1
     try:
@@ -338,7 +341,13 @@ def register_page(request: Request):
 @router.get("/login", response_class=HTMLResponse)
 def login_page(request: Request):
     return templates.TemplateResponse(
-        request, "login.html", {"next": request.query_params.get("next", "")}
+        request,
+        "login.html",
+        {
+            "next": request.query_params.get("next", ""),
+            # D8: account deletion lands here with an honest notice.
+            "deleted": request.query_params.get("deleted", ""),
+        },
     )
 
 
@@ -357,10 +366,19 @@ def settings_page(request: Request, conn=Depends(db.get_conn)):
     uid = _current_uid(request, conn)
     if uid is None:
         return RedirectResponse("/login?next=/settings", status_code=303)
+    # D6: remember the published photo across reloads, not just for the session that posted it.
+    photo = db.one(conn, "SELECT photo_path, photo_published_at FROM users WHERE id=?", (uid,))
+    has_photo = bool(photo and photo["photo_path"] and photo["photo_published_at"])
     return templates.TemplateResponse(
         request,
         "settings.html",
-        {"signed_in": True, "user_id": uid, "grants": _snapshot_grants(conn, uid)},
+        {
+            "signed_in": True,
+            "user_id": uid,
+            "grants": _snapshot_grants(conn, uid),
+            "has_photo": has_photo,
+            "photo_url": f"/media/photo/{uid}" if has_photo else "",
+        },
     )
 
 

@@ -15,6 +15,8 @@
 <script>
   const status = document.getElementById("matches-status");
   const list = document.getElementById("matches-list");
+  const EXPIRED_NOTICE =
+    "Your saved free time expired — re-add it to see your plans.";
 
   function matchEl(item) {
     const el = document.createElement("article");
@@ -45,28 +47,69 @@
     return el;
   }
 
-  (async function () {
+  let lastPayload = null;
+  let pollSeq = 0;
+  let pollInFlight = false;
+
+  async function load() {
+    const seq = ++pollSeq;
+    let res;
     try {
-      const res = await fetch("/api/matches", {headers: {"Accept": "application/json"}});
-      if (res.status === 401) {
-        window.location.href = "/login?next=/matches";
-        return;
-      }
-      if (!res.ok) {
-        let data = null;
-        try { data = await res.json(); } catch (err) { data = null; }
-        show(status, "Couldn't load your matches. " + apiError(res, data), "error");
-        return;
-      }
-      const data = await res.json();
-      const items = (data && data.matches) || [];
-      list.innerHTML = "";
-      for (const item of items) list.appendChild(matchEl(item));
-      if (items.length === 0) show(status, "No confirmed plans yet.", "info");
-      else status.hidden = true;
+      res = await fetch("/api/matches", {headers: {"Accept": "application/json"}});
     } catch (err) {
       show(status, "Couldn't load your matches. Check your connection and try again.", "error");
+      return;
     }
-  })();
+    // REGRESSION-4: drop a stale response that a newer request already superseded.
+    if (seq !== pollSeq) return;
+    if (res.status === 401) {
+      window.location.href = "/login?next=/matches";
+      return;
+    }
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (seq !== pollSeq) return;
+    if (!res.ok) {
+      show(status, "Couldn't load your matches. " + apiError(res, data), "error");
+      return;
+    }
+    const key = JSON.stringify(data);
+    // B1: re-render only when the payload changed, so polling never reflows the page.
+    if (key === lastPayload) return;
+    lastPayload = key;
+    const items = (data && data.matches) || [];
+    list.innerHTML = "";
+    for (const item of items) list.appendChild(matchEl(item));
+    if (items.length === 0) {
+      show(status, "No confirmed plans yet.", "info");
+    } else {
+      status.hidden = true;
+    }
+    if (data && data.availability_lapsed) {
+      // B4: anonymous by design — it never names the person or the withheld window.
+      const notice = document.createElement("p");
+      notice.className = "notice warn";
+      notice.textContent = EXPIRED_NOTICE;
+      list.appendChild(notice);
+    }
+  }
+
+  load();
+
+  // REGRESSION-4: shared poll pattern — skip hidden tabs, never overlap, drop stale responses.
+  async function poll() {
+    if (document.hidden || pollInFlight) return;
+    pollInFlight = true;
+    try {
+      await load();
+    } finally {
+      pollInFlight = false;
+    }
+  }
+
+  window.setInterval(poll, 15000);
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) poll();
+  });
 </script>
 {% endblock %}

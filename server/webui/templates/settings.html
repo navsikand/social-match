@@ -9,20 +9,29 @@
 <section class="panel photo-panel">
   <h2>Publish this photo on my card</h2>
   <p class="muted">Your photo is shown to signed-in people who receive your live candidate card, before either person confirms. Not to the public, not to anyone you haven't been matched with. You can remove it any time.</p>
-  <p><input id="photo-file" type="file" accept="image/jpeg,image/png"></p>
-  <img id="photo-preview" class="photo-preview" alt="Your photo preview" hidden>
+  <p>
+    <label for="photo-file">Choose a photo (JPEG or PNG, up to 5 MB)</label>
+    <input id="photo-file" type="file" accept="image/jpeg,image/png">
+  </p>
+  <img id="photo-preview" class="photo-preview" alt="Your published photo"
+       data-published="{{ 'true' if has_photo else 'false' }}"
+       {% if photo_url %}src="{{ photo_url }}"{% else %}hidden{% endif %}>
   <p class="photo-actions">
     <button id="photo-publish" class="primary" type="button" disabled>Publish</button>
-    <button id="photo-remove" class="secondary" type="button">Remove</button>
+    <button id="photo-remove" class="secondary" type="button"
+            {% if not has_photo %}disabled{% endif %}>Remove</button>
   </p>
-  <p id="photo-status" class="notice" hidden></p>
+  <p id="photo-status" class="notice" role="status" aria-live="polite"
+     aria-busy="false" hidden></p>
 </section>
 
 <section class="panel">
   <h2>Matching</h2>
   <label class="check">
     <input type="checkbox" id="matching" {% if grants.matching %}checked{% endif %}>
-    Let the matcher look for compatible people and create cards.
+    <span>Let the matcher look for compatible people and create cards.
+      <span class="muted small">Turning this off deletes your saved free-time windows and
+        cancels open and confirmed plans.</span></span>
   </label>
 </section>
 
@@ -32,9 +41,10 @@
     <input type="checkbox" id="delegation" {% if grants.delegation %}checked{% endif %}>
     Let my assistant accept, counter or pass offers for me
   </label>
-  <p class="muted small">Off by default. On this demo box, accounts may start with this on
-    (DELEGATION_DEFAULT_ON); you can withdraw it any time, and only this page can change it.</p>
-  <p id="delegation-status" class="notice" hidden></p>
+  <p class="muted small">Off by default. On this demo box an account may start with it on.
+    You can withdraw it at any time, and only this page can change it.</p>
+  <p id="delegation-status" class="notice" role="status" aria-live="polite"
+     aria-busy="false" hidden></p>
 </section>
 
 <section class="panel">
@@ -48,7 +58,8 @@
     </select>
   </label>
   <p><button id="save" class="primary" type="button">Save sharing settings</button></p>
-  <p id="settings-status" class="notice" hidden></p>
+  <p id="settings-status" class="notice" role="status" aria-live="polite"
+     aria-busy="false" hidden></p>
 </section>
 
 <section class="panel danger">
@@ -56,7 +67,8 @@
   <p class="muted">Deletes your windows, tags, pairings, cards and live grants. Stripped audit rows and
     pseudonymous block hashes are kept for safety, then purged on their retention schedule.</p>
   <button id="delete-account" class="danger" type="button">Delete my account</button>
-  <p id="delete-status" class="notice" hidden></p>
+  <p id="delete-status" class="notice" role="status" aria-live="polite"
+     aria-busy="false" hidden></p>
 </section>
 {% endblock %}
 {% block scripts %}
@@ -67,23 +79,44 @@
   publication.value = publication.dataset.current || "off";
   const delStatus = document.getElementById("delete-status");
 
-  document.getElementById("save").addEventListener("click", async function () {
-    show(status, "Saving…", "info");
+  const saveBtn = document.getElementById("save");
+  saveBtn.addEventListener("click", async function () {
+    // B2: a second tap must not start a second grant write.
+    if (saveBtn.disabled) return;
     const payload = {
       matching: document.getElementById("matching").checked,
       publication: {tier: document.getElementById("publication").value},
     };
+    // A4: matching:false is not a pause switch — the server's leave-matching cascade deletes
+    // availability and cancels open AND confirmed plans. Say so, then require a confirmation.
+    if (payload.matching === false) {
+      const proceed = window.confirm(
+        "Turn matching off? This deletes your saved free-time windows and cancels open " +
+        "and confirmed plans. This cannot be undone."
+      );
+      if (!proceed) return;
+    }
+    saveBtn.disabled = true;
+    show(status, "Saving…", "info");
     try {
       const out = await postJSON(GRANTS_URL, payload);
       if (out.res.ok) {
         const g = (out.data && out.data.grants) || {};
-        show(status, "Saved. Matching is " + (g.matching ? "on" : "off") +
-          "; publication is " + (g.publication ? g.publication.tier : "off") + ".", "ok");
+        const matchingCopy = payload.matching === false
+          ? "Matching is off — your saved free-time windows were deleted and open and confirmed plans cancelled."
+          : "Matching is " + (g.matching ? "on" : "off") + ".";
+        show(status, "Saved. " + matchingCopy +
+          " Publication is " + (g.publication ? g.publication.tier : "off") + ".", "ok");
+      } else if (out.res.status === 401) {
+        window.location.href = "/login?next=/settings";
+        return;
       } else {
         show(status, apiError(out.res, out.data), "error");
       }
     } catch (err) {
       show(status, "Network error — is the server running?", "error");
+    } finally {
+      saveBtn.disabled = false;
     }
   });
 
@@ -118,17 +151,25 @@
     }
   });
 
-  document.getElementById("delete-account").addEventListener("click", async function () {
+  const deleteBtn = document.getElementById("delete-account");
+  deleteBtn.addEventListener("click", async function () {
+    if (deleteBtn.disabled) return;
     const ok = window.confirm(
       "Delete your account? Your cards, availability and live grants are removed. " +
       "This cannot be undone."
     );
     if (!ok) return;
+    deleteBtn.disabled = true;
+    let navigating = false;
     show(delStatus, "Deleting…", "info");
     try {
       const out = await postJSON("/api/delete-account", {confirm: true});
       if (out.res.ok) {
-        window.location.href = "/login";
+        // D8: drop the now-dead session cookie, then land on a page that says what happened
+        // instead of a blank sign-in form whose credentials then "fail".
+        try { await fetch("/api/logout", {method: "POST"}); } catch (err) { /* cookie clears anyway */ }
+        navigating = true;
+        window.location.href = "/login?deleted=1";
         return;
       }
       if (out.res.status === 404) {
@@ -142,6 +183,8 @@
       show(delStatus, apiError(out.res, out.data), "error");
     } catch (err) {
       show(delStatus, "Network error — is the server running?", "error");
+    } finally {
+      if (!navigating) deleteBtn.disabled = false;
     }
   });
 
@@ -156,6 +199,8 @@
   const PHOTO_QUALITY = 0.85;
   let photoBlob = null;
   let previewObjectUrl = null;
+  // D6: the server tells us on load whether a photo is published; Remove only makes sense then.
+  let photoPublished = photoPreview.dataset.published === "true";
 
   function photoMessage(res, data) {
     if (res.status === 413) {
@@ -281,6 +326,9 @@
       if (res.ok) {
         const url = (data && data.photo_url) || null;
         if (url) showPreview(url, false);
+        photoPublished = true;
+        photoPreview.dataset.published = "true";
+        photoRemove.disabled = false;
         show(photoStatus, "Published. Your card shows this photo to people who receive it.", "ok");
         photoPublish.disabled = false;
       } else {
@@ -294,6 +342,11 @@
   });
 
   photoRemove.addEventListener("click", async function () {
+    if (!photoPublished) return;
+    const ok = window.confirm(
+      "Remove your published photo? Your card shows your avatar again until you publish another."
+    );
+    if (!ok) return;
     show(photoStatus, "Removing…", "info");
     try {
       const res = await fetch("/api/me/photo", {method: "DELETE"});
@@ -301,6 +354,9 @@
       try { data = await res.json(); } catch (err) { data = null; }
       if (res.ok) {
         photoBlob = null;
+        photoPublished = false;
+        photoPreview.dataset.published = "false";
+        photoRemove.disabled = true;
         photoFile.value = "";
         clearPreview();
         photoPublish.disabled = true;

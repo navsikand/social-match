@@ -6,16 +6,15 @@
   <p class="muted">Tell it what you want to change — it previews anything that touches your
     availability or events, and you confirm with one click. Only Settings can change grants.</p>
   {% if ai_enabled %}
-    <p class="muted small" id="chat-model">Model: {{ model_name or "configured" }}</p>
+    <p class="muted small" id="chat-model">Your assistant is connected.</p>
   {% endif %}
 </section>
 
 {% if not ai_enabled %}
 <section class="panel" id="ai-banner">
   <h2>The assistant is not configured</h2>
-  <p class="muted">This server has no <code>AI_API_URL</code> configured, so chat is off. An
-    operator can enable it by setting <code>AI_API_URL</code> (and <code>AI_API_KEY</code> /
-    <code>AI_MODEL</code>) and restarting. Everything else keeps working without it.</p>
+  <p class="muted">Chat is not enabled on this server yet. Ask the site operator to turn the
+    assistant on. Everything else keeps working without it.</p>
 </section>
 {% endif %}
 
@@ -29,19 +28,24 @@
     <h2>Conversation</h2>
     <button id="clear-history" class="linklike" type="button">Clear history</button>
   </div>
-  <p id="chat-status" class="notice" hidden></p>
-  <div id="transcript" class="stack" aria-live="polite"
+  <div id="transcript" class="stack" aria-live="off"
        style="max-height:26rem; overflow-y:auto; gap:0.6rem;"></div>
+  <div id="chat-announcer" role="log" aria-live="polite"
+       style="position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
+              clip:rect(0 0 0 0);white-space:nowrap;border:0;"></div>
 
   <section id="pending" class="panel" hidden>
     <h3 id="pending-title">Waiting for your confirmation</h3>
     <p class="muted small">Nothing is saved until you confirm. It expires after 10 minutes.</p>
     <ul id="pending-items" class="steps"></ul>
+    <p id="pending-expiry" class="muted small" hidden></p>
     <p class="photo-actions">
       <button id="pending-confirm" class="primary" type="button">Confirm</button>
       <button id="pending-cancel" class="secondary" type="button">Cancel</button>
     </p>
   </section>
+
+  <p id="chat-status" class="notice" role="status" aria-live="polite" hidden></p>
 
   {% if ai_enabled %}
   <form id="composer" class="stack" style="margin-top:1rem;">
@@ -49,7 +53,10 @@
       <textarea id="composer-text" rows="3" maxlength="4000"
                 placeholder="e.g. I'm free Thursday evening and into bouldering"></textarea>
     </label>
-    <p><button id="send" class="primary" type="submit">Send</button></p>
+    <p>
+      <button id="send" class="primary" type="submit">Send</button>
+      <button id="cancel-turn" class="secondary" type="button" hidden>Cancel</button>
+    </p>
   </form>
   {% endif %}
 </section>
@@ -107,9 +114,14 @@
   const pendingBox = document.getElementById("pending");
   const pendingTitle = document.getElementById("pending-title");
   const pendingItems = document.getElementById("pending-items");
+  const pendingExpiry = document.getElementById("pending-expiry");
   const clearButton = document.getElementById("clear-history");
+  const cancelButton = document.getElementById("cancel-turn");
+  const announcer = document.getElementById("chat-announcer");
 
   let abortController = null;
+  let pendingTimer = null;
+  let lastPayloadHash = null;
   // Finding 14: set true by any error/conflict (the status line becomes STICKY), cleared ONLY
   // when a new user send starts — never by the `done` event that follows a failure.
   let statusSticky = false;
@@ -185,6 +197,30 @@
     show(status, text, cls || "error");
   }
 
+  // C9: an accepted offer should lead somewhere. A text-only "done" is a dead end, so the
+  // status line carries a real link to the plans page.
+  function notifyWithLink(text, href, label, cls) {
+    show(status, text, cls || "ok");
+    status.appendChild(document.createTextNode(" "));
+    const link = document.createElement("a");
+    link.href = href;
+    link.textContent = label;
+    status.appendChild(link);
+  }
+
+  // B10: Clear history must not race an in-flight turn (the server serialises on the same lock,
+  // so the click would just block invisibly). Disabled plus a visible explanation.
+  function setClearBusy(busy) {
+    if (!clearButton) return;
+    clearButton.disabled = busy;
+    clearButton.setAttribute("aria-disabled", busy ? "true" : "false");
+    if (busy) {
+      clearButton.title = "Clear history is unavailable while the assistant is replying — wait or press Cancel first.";
+    } else {
+      clearButton.removeAttribute("title");
+    }
+  }
+
   // ---------------------------------------------------------------- pending preview (13-UI)
   const WINDOWS_LABEL = "Free windows";
   const EVENTS_LABEL = "Events";
@@ -249,11 +285,62 @@
     return picked;
   }
 
+  function expiryLabel(iso) {
+    const when = new Date(iso);
+    if (isNaN(when.getTime())) return "";
+    return when.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+  }
+
+  // A9: show when the preview dies and switch Confirm off at that instant. The server still
+  // enforces expiry; this only stops offering a button that is already guaranteed to fail.
+  function startPendingExpiry(expiresAt) {
+    if (pendingTimer) {
+      clearInterval(pendingTimer);
+      pendingTimer = null;
+    }
+    if (!pendingExpiry) return;
+    const when = new Date(expiresAt);
+    const confirm = document.getElementById("pending-confirm");
+    if (isNaN(when.getTime())) {
+      pendingExpiry.hidden = true;
+      pendingExpiry.textContent = "";
+      if (confirm) confirm.disabled = false;
+      return;
+    }
+    const label = expiryLabel(expiresAt);
+    function tick() {
+      if (when.getTime() - Date.now() <= 0) {
+        pendingExpiry.textContent = "This preview expired — ask again.";
+        if (confirm) confirm.disabled = true;
+        if (pendingTimer) {
+          clearInterval(pendingTimer);
+          pendingTimer = null;
+        }
+        return;
+      }
+      pendingExpiry.textContent = "expires at " + label;
+      if (confirm) confirm.disabled = false;
+    }
+    pendingExpiry.hidden = false;
+    tick();
+    pendingTimer = setInterval(tick, 1000);
+  }
+
   function renderPending(pending) {
     pendingItems.textContent = "";
     pendingPicks = [];
     delete pendingBox.dataset.pendingId;
     delete pendingBox.dataset.pendingKind;
+    if (pendingTimer) {
+      clearInterval(pendingTimer);
+      pendingTimer = null;
+    }
+    if (pendingExpiry) {
+      pendingExpiry.hidden = true;
+      pendingExpiry.textContent = "";
+    }
+    const confirmButton = document.getElementById("pending-confirm");
+    if (confirmButton) confirmButton.disabled = false;
     if (!pending) {
       pendingBox.hidden = true;
       return;
@@ -304,6 +391,7 @@
     pendingBox.hidden = false;
     pendingBox.dataset.pendingId = String(pending.id);
     pendingBox.dataset.pendingKind = kind;
+    startPendingExpiry(pending.expires_at);
   }
 
   async function refreshPending() {
@@ -381,6 +469,22 @@
   const tagOptionsTemplate = document.getElementById("tag-options");
   const reasonOptionsTemplate = document.getElementById("reason-options");
   let negotiationBusy = false;
+  // REGRESSION-2: a poll that rebuilds the panel must not discard a Counter/Pass draft. Each
+  // candidate gets its own slot so one candidate's poll cannot leak another's form values.
+  const negotiationDrafts = {};
+
+  function saveDraft(candidateId, patch) {
+    const key = String(candidateId);
+    const draft = negotiationDrafts[key] || {};
+    for (const field in patch) {
+      if (Object.prototype.hasOwnProperty.call(patch, field)) draft[field] = patch[field];
+    }
+    negotiationDrafts[key] = draft;
+  }
+
+  function clearDraft(candidateId) {
+    delete negotiationDrafts[String(candidateId)];
+  }
 
   function humanTag(tag) {
     return String(tag == null ? "" : tag).replace(/_/g, " ");
@@ -456,16 +560,35 @@
     passBox.appendChild(passSend);
     box.appendChild(passBox);
 
+    // REGRESSION-2: restore the candidate's in-progress draft after a re-render.
+    const draft = negotiationDrafts[String(item.candidate_id)] || {};
+    if (draft.tag) tagField.select.value = draft.tag;
+    if (draft.url) urlInput.value = draft.url;
+    if (draft.reason) reasonField.select.value = draft.reason;
+    if (draft.open === "counter") counterBox.hidden = false;
+    if (draft.open === "pass") passBox.hidden = false;
+
     accept.addEventListener("click", function () {
       respondOffer(item, {action: "accept"});
     });
     counterToggle.addEventListener("click", function () {
       counterBox.hidden = !counterBox.hidden;
       passBox.hidden = true;
+      saveDraft(item.candidate_id, {open: counterBox.hidden ? null : "counter"});
     });
     passToggle.addEventListener("click", function () {
       passBox.hidden = !passBox.hidden;
       counterBox.hidden = true;
+      saveDraft(item.candidate_id, {open: passBox.hidden ? null : "pass"});
+    });
+    tagField.select.addEventListener("change", function () {
+      saveDraft(item.candidate_id, {tag: tagField.select.value});
+    });
+    urlInput.addEventListener("input", function () {
+      saveDraft(item.candidate_id, {url: urlInput.value});
+    });
+    reasonField.select.addEventListener("change", function () {
+      saveDraft(item.candidate_id, {reason: reasonField.select.value});
     });
     counterSend.addEventListener("click", function () {
       const tag = tagField.select.value;
@@ -501,7 +624,7 @@
     const heading = document.createElement("p");
     heading.className = "muted small";
     const when = windowText(item.window);
-    heading.textContent = "Match #" + item.candidate_id + (when ? " · " + when : "");
+    heading.textContent = (item.about || "This match") + (when ? " · " + when : "");
     card.appendChild(heading);
 
     const line = document.createElement("p");
@@ -521,12 +644,33 @@
       note += " — this round is closed";
     }
     appendTextNodes(meta, note);
+    if (activity.state === "accepted") {
+      meta.appendChild(document.createTextNode(" · "));
+      const plans = document.createElement("a");
+      plans.href = "/matches";
+      plans.textContent = "See your plans";
+      meta.appendChild(plans);
+    }
     card.appendChild(meta);
 
     if (activity.state === "offered" && !activity.proposed_by_you) {
       card.appendChild(offerControls(item));
     }
     return card;
+  }
+
+  // B9: keep the Counter/Pass form the student just filled in, and put the refusal beside it.
+  function showOfferError(candidateId, text) {
+    if (!negotiationsList) return;
+    const card = negotiationsList.querySelector('[data-candidate-id="' + String(candidateId) + '"]');
+    if (!card) return;
+    let row = card.querySelector(".offer-error");
+    if (!row) {
+      row = document.createElement("p");
+      row.className = "notice error offer-error";
+      card.appendChild(row);
+    }
+    row.textContent = text;
   }
 
   async function respondOffer(item, fields) {
@@ -537,19 +681,33 @@
     for (const key in fields) {
       if (Object.prototype.hasOwnProperty.call(fields, key)) body[key] = fields[key];
     }
+    let saved = false;
     try {
+      // B6: the negotiation worker ticks every 15 s. Re-read the offer immediately before
+      // posting, so a click can never answer an offer that was already answered/replaced.
+      const fresh = await loadOffer(item.candidate_id);
+      if (!fresh || !fresh.activity || fresh.activity.state !== "offered"
+          || fresh.activity.offer_id !== body.offer_id) {
+        notifySticky("That offer changed while you were deciding — the panel has been refreshed. Check the current offer before answering.");
+        await refreshNegotiations();
+        return;
+      }
       const out = await postJSON(OFFER_RESPOND_URL, body);
       if (out.res.status === 401) {
         window.location.href = "/login?next=/chat";
         return;
       }
       if (!out.res.ok) {
-        notifySticky(apiError(out.res, out.data));
+        const message = apiError(out.res, out.data);
+        notifySticky(message);
+        showOfferError(item.candidate_id, message);
         return;
       }
+      saved = true;
       const outState = out.data && out.data.state;
       if (outState === "accepted") {
-        notify("Offer accepted — the plan still needs both students to confirm it.", "ok");
+        notifyWithLink("Offer accepted — the plan still needs both students to confirm it.",
+                       "/matches", "See your plans", "ok");
       } else if (outState === "passed") {
         notify(out.data && out.data.exhausted
           ? "Offer passed. No activity worked out — pick one on the match card."
@@ -559,9 +717,13 @@
       }
     } catch (err) {
       notifySticky("Network error — is the server running?");
+      showOfferError(item.candidate_id, "Network error — is the server running?");
     } finally {
       negotiationBusy = false;
-      refreshNegotiations();
+      if (saved) {
+        clearDraft(item.candidate_id);
+        refreshNegotiations();
+      }
     }
   }
 
@@ -590,6 +752,7 @@
           candidate_id: card.candidate_id,
           proposal_version: card.proposal_version,
           window: card.window && card.window.display,
+          about: (card.about && card.about.display_name) || "",
           activity: card.activity || null,
         };
       } catch (err) {
@@ -600,16 +763,19 @@
     return {
       candidate_id: data.candidate_id || candidateId,
       proposal_version: data.proposal_version,
+      about: data.about || "",
       window: typeof data.window === "string"
         ? data.window : ((data.window && data.window.display) || ""),
       activity: data.activity,
     };
   }
 
+  let negotiationsSignature = null;
+
   async function refreshNegotiations() {
     if (!negotiationsList) return;
-    negotiationsList.textContent = "";
     const items = [];
+    let loaded = false;
     try {
       const res = await fetch("/api/dashboard", {headers: {"Accept": "application/json"}});
       if (res.status === 401) {
@@ -619,14 +785,32 @@
       if (res.ok) {
         const data = await res.json();
         const candidates = (data && data.candidates) || [];
+        // RELEASE-BLOCKING 2: one failed per-candidate read must not silently drop that card
+        // (and its draft) from the panel. An incomplete read is treated exactly like a failed
+        // dashboard read: retain what is rendered and try again on the next poll.
+        let complete = true;
         for (let i = 0; i < candidates.length; i += 1) {
           const offer = await loadOffer(candidates[i].candidate_id);
           if (offer) items.push(offer);
+          else complete = false;
         }
+        loaded = complete;
       }
     } catch (err) {
-      /* best effort: the panel simply stays empty when the dashboard call fails */
+      /* best effort: keep whatever is already on screen when the dashboard call fails */
     }
+    // REGRESSION-2: a failed read must NOT look like "no negotiations" and clear the panel —
+    // that would destroy the open Counter/Pass form. Retain the current cards instead.
+    if (!loaded) return;
+    // B1/B9: polling must not rebuild the panel (and wipe an open Counter/Pass form) when
+    // nothing changed, so compare the rendered payload first.
+    const signature = JSON.stringify(items);
+    if (signature === negotiationsSignature) {
+      if (negotiationsEmpty) negotiationsEmpty.hidden = items.length > 0;
+      return;
+    }
+    negotiationsSignature = signature;
+    negotiationsList.textContent = "";
     for (let i = 0; i < items.length; i += 1) {
       negotiationsList.appendChild(negotiationCard(items[i]));
     }
@@ -634,6 +818,29 @@
   }
 
   // ---------------------------------------------------------------- history
+  function payloadHash(data) {
+    const text = JSON.stringify({
+      messages: data && data.messages,
+      state: data && data.state,
+      pending: data && data.pending,
+    });
+    let hash = 0;
+    for (let i = 0; i < text.length; i += 1) {
+      hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+    }
+    return String(hash);
+  }
+
+  async function renderHistory(data) {
+    transcript.textContent = "";
+    const messages = (data && data.messages) || [];
+    for (let i = 0; i < messages.length; i += 1) {
+      messageRow(messages[i].role, messages[i].content);
+    }
+    renderChips(data && data.state);
+    renderPending(data && data.pending);
+  }
+
   async function loadHistory() {
     try {
       const res = await fetch("/api/chat/history", {headers: {"Accept": "application/json"}});
@@ -648,22 +855,53 @@
         return;
       }
       const data = await res.json();
-      transcript.textContent = "";
-      const messages = data.messages || [];
-      for (let i = 0; i < messages.length; i += 1) {
-        messageRow(messages[i].role, messages[i].content);
-      }
-      renderChips(data.state);
-      renderPending(data.pending);
+      lastPayloadHash = payloadHash(data);
+      await renderHistory(data);
       refreshNegotiations();
     } catch (err) {
       notifySticky("Network error — is the server running?");
     }
   }
 
+  // B1: while the page is visible, reconcile from history every ~20 s. Only a changed payload is
+  // re-rendered, so the transcript never jumps under a reader (and an in-flight turn owns it).
+  let pollSeq = 0;
+  let pollInFlight = false;
+
+  async function pollHistory() {
+    // REGRESSION-4: skip hidden tabs and never overlap a poll.
+    if (document.hidden || pollInFlight || abortController) return;
+    pollInFlight = true;
+    const seq = ++pollSeq;
+    try {
+      const res = await fetch("/api/chat/history", {headers: {"Accept": "application/json"}});
+      // REGRESSION-4: drop a stale response that lost the race to a newer request.
+      if (seq !== pollSeq) return;
+      if (res.status === 401) {
+        window.location.href = "/login?next=/chat";
+        return;
+      }
+      if (!res.ok) return;
+      const data = await res.json();
+      // REGRESSION-3: a turn may have started during the await. Re-check ownership AFTER the
+      // fetch, immediately before rendering, so polling never erases a live transcript.
+      if (seq !== pollSeq || abortController) return;
+      const hash = payloadHash(data);
+      if (hash !== lastPayloadHash) {
+        lastPayloadHash = hash;
+        await renderHistory(data);
+      }
+      refreshNegotiations();
+    } catch (err) {
+      /* polling is best-effort; the sticky status line already survives real failures */
+    } finally {
+      pollInFlight = false;
+    }
+  }
+
   // ---------------------------------------------------------------- streaming
   const ERROR_HINTS = {
-    ai_unconfigured: "Chat is not configured on this server (set AI_API_URL).",
+    ai_unconfigured: "Chat is not enabled on this server — ask the operator to turn it on.",
     ai_auth: "The model provider rejected our key — an operator needs to fix it.",
     ai_timeout: "The assistant took too long to answer. Try again.",
     ai_http: "The model provider returned an error.",
@@ -742,14 +980,18 @@
     const textarea = document.getElementById("composer-text");
     if (sendButton) sendButton.disabled = true;
     if (textarea) textarea.disabled = true;
+    if (cancelButton) cancelButton.hidden = false;
+    setClearBusy(true);
     // A NEW SEND is the only thing that clears a sticky error/conflict (finding 14).
     statusSticky = false;
     notify("Thinking…", "info");
-    messageRow("user", text);
+    const userRow = messageRow("user", text);
 
     abortController = new AbortController();
     const live = {row: messageRow("assistant", ""), text: ""};
     let gotEvent = false;
+    let restoreText = false;
+    let watchdog = null;
 
     async function dispatchBlock(block) {
       const lines = block.split("\n");
@@ -762,10 +1004,23 @@
         } catch (err) {
           continue;
         }
+        if (!gotEvent && watchdog) {
+          clearTimeout(watchdog);
+          watchdog = null;
+        }
         gotEvent = true;
         handleEvent(event, live);
       }
     }
+
+    // A7: if the FIRST event never arrives, say so and point at the Cancel button instead of
+    // leaving the student staring at "Thinking…" forever.
+    watchdog = setTimeout(function () {
+      watchdog = null;
+      if (!gotEvent && abortController) {
+        notify("Still waiting on the model… Cancel?", "info");
+      }
+    }, 10000);
 
     try {
       const res = await fetch("/api/chat", {
@@ -783,7 +1038,11 @@
         }
         const code = (data && data.error) || "";
         const detail = (data && data.detail) || "";
+        // C1: this send was NOT stored. Drop the optimistic bubble and give the text back, so a
+        // busy/rate-limited/refused turn costs nothing.
+        if (userRow) userRow.remove();
         if (live.row) live.row.remove();
+        restoreText = true;
         notifySticky(errorLine(code, typeof detail === "string" ? detail : ""));
         return;
       }
@@ -805,6 +1064,13 @@
       buffer += decoder.decode();
       if (buffer.trim()) await dispatchBlock(buffer);
 
+      // D1: the transcript is aria-live="off"; announce the COMPLETED reply once, here, instead
+      // of re-announcing the whole bubble on every token.
+      const finalText = stripActionBlock(live.text).trim();
+      if (announcer && finalText && !statusSticky) {
+        announcer.textContent = "Assistant replied: " + finalText;
+      }
+
       if (!gotEvent) {
         notifySticky("The stream ended without an answer. Try again.");
       } else if (!statusSticky) {
@@ -812,14 +1078,24 @@
         status.hidden = true;
       }
     } catch (err) {
-      if (err && err.name === "AbortError") return;
+      if (err && err.name === "AbortError") {
+        // A7: abort stops WAITING; it is not proof the server stopped, so never promise rollback.
+        notify("Stopped waiting — check the transcript for what the server recorded. The server may still be finishing the turn.", "info");
+        return;
+      }
       notifySticky("Network error — is the server running?");
     } finally {
+      if (watchdog) {
+        clearTimeout(watchdog);
+        watchdog = null;
+      }
       abortController = null;
+      if (cancelButton) cancelButton.hidden = true;
+      setClearBusy(false);
       if (sendButton) sendButton.disabled = false;
       if (textarea) {
         textarea.disabled = false;
-        textarea.value = "";
+        textarea.value = restoreText ? text : "";
         textarea.focus();
       }
       refreshPending();
@@ -837,7 +1113,17 @@
     });
   }
 
+  if (cancelButton) {
+    cancelButton.addEventListener("click", function () {
+      if (abortController) abortController.abort();
+    });
+  }
+
   clearButton.addEventListener("click", async function () {
+    if (abortController) {
+      notify("Can't clear history while the assistant is replying — wait or press Cancel first.", "error");
+      return;
+    }
     if (!window.confirm("Clear your chat history? The transcript and any pending preview go.")) {
       return;
     }
@@ -866,5 +1152,9 @@
   });
 
   loadHistory();
+  setInterval(pollHistory, 20000);
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) pollHistory();
+  });
 </script>
 {% endblock %}

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Request
@@ -74,15 +75,56 @@ _UNSUPPORTED = {
 class _Reject(Exception):
     """A refusal that maps straight onto the {"error", "detail"} HTTP shape."""
 
-    def __init__(self, status: int, code: str, detail: str):
+    def __init__(self, status: int, code: str, detail: str, extra: dict | None = None):
         super().__init__(detail)
         self.status = status
         self.code = code
         self.detail = detail
+        # Optional machine-readable fields merged into the {"error", "detail"} JSON body.
+        self.extra = extra or {}
 
 
 def _rejected(detail: str) -> _Reject:
     return _Reject(422, "ics_rejected", detail)
+
+
+# C8: a Google/Outlook export can produce thousands of per-event refusals; the raw
+# "; ".join wall is unreadable (and multi-KB). Past this length the detail becomes
+# per-property counts + the first three affected event indices, with the structured
+# counts also returned so the page can put them in a collapsible <details> block.
+_MAX_DETAIL_CHARS = 400
+_ERROR_LABEL = re.compile(r"event (\d+): ([A-Z]+)")
+
+
+def _collapse_errors(errors: list[str]) -> tuple[str, dict | None]:
+    unique = list(dict.fromkeys(errors))
+    joined = "; ".join(unique)
+    if len(joined) <= _MAX_DETAIL_CHARS:
+        return joined, None
+    counts: dict[str, int] = {}
+    indices: list[int] = []
+    for message in unique:
+        match = _ERROR_LABEL.match(message)
+        label = match.group(2) if match else "calendar"
+        counts[label] = counts.get(label, 0) + 1
+        if match is not None:
+            index = int(match.group(1))
+            if index not in indices:
+                indices.append(index)
+    indices.sort()
+    first = indices[:3]
+    where = ", ".join(str(index) for index in first) if first else "unknown"
+    if len(indices) > len(first):
+        where += " and others"
+    parts = ", ".join(f"{label} ×{count}" for label, count in sorted(counts.items()))
+    detail = (
+        f"this calendar has {len(unique)} problems in events {where}: {parts}. "
+        "Nothing was stored."
+    )
+    problems = [
+        {"property": label, "count": count} for label, count in sorted(counts.items())
+    ]
+    return detail, {"problems": problems, "indices": first}
 
 
 def _forbidden(detail: str) -> JSONResponse:
@@ -370,7 +412,8 @@ def parse_ics(text: str, tz: str) -> list[tuple[datetime.datetime, datetime.date
             "no BEGIN:VCALENDAR found — a calendar needs a BEGIN:VCALENDAR ... END:VCALENDAR wrapper"
         )
     if errors:
-        raise _rejected("; ".join(dict.fromkeys(errors)))
+        detail, extra = _collapse_errors(errors)
+        raise _Reject(422, "ics_rejected", detail, extra)
     if dst_errors:
         raise _Reject(422, "dst_ambiguous", "; ".join(dict.fromkeys(dst_errors)))
     if seen_event == 0:
@@ -495,7 +538,9 @@ def _store_ics_pending(conn, uid: int, items: list[dict], tz: str, state_hash: s
     # below is its SOLE consumer (chat/confirm refuses kind='ics' before reading the payload).
     payload = json.dumps({"items": items, "tz": tz})
     with db.immediate(conn):
-        conn.execute("DELETE FROM chat_pending WHERE user_id=?", (uid,))
+        # B3: only a previous ICS preview is superseded. A pending chat windows preview
+        # (kind='windows') belongs to the chat surface and must survive this upload.
+        conn.execute("DELETE FROM chat_pending WHERE user_id=? AND kind='ics'", (uid,))
         cursor = conn.execute(
             "INSERT INTO chat_pending (user_id, kind, payload_json, state_hash, created_at,"
             " expires_at) VALUES (?,?,?,?,?,?)",
@@ -531,6 +576,36 @@ def _decode_pending(row) -> dict:
 
 
 # --------------------------------------------------------------------- manual windows
+
+
+@router.get("/schedule/windows")
+def get_windows(user=Depends(require_session), conn=Depends(db.get_conn)):
+    """A1: the stored windows, so the page can prefill instead of loading blank."""
+    uid = user["id"]
+    rows = db.q(
+        conn,
+        "SELECT starts_at, ends_at, tz FROM availability_windows"
+        " WHERE user_id=? ORDER BY starts_at, id",
+        (uid,),
+    )
+    latest = db.one(
+        conn,
+        "SELECT tz FROM availability_windows WHERE user_id=? ORDER BY id DESC LIMIT 1",
+        (uid,),
+    )
+    # One select controls every row, so render every stored instant in that zone. Converting
+    # per-window instead would shift mixed-zone lists on the next Save.
+    tz = latest["tz"] if latest is not None else "UTC"
+    zone = ZoneInfo(tz)
+    windows = [
+        {
+            "start": _wall(_utc(row["starts_at"]), zone).strftime(_LOCAL_FMT),
+            "end": _wall(_utc(row["ends_at"]), zone).strftime(_LOCAL_FMT),
+            "tz": tz,
+        }
+        for row in rows
+    ]
+    return {"windows": windows, "tz": tz}
 
 
 @router.post("/schedule/windows")
@@ -590,7 +665,13 @@ async def set_windows(request: Request, user=Depends(require_session), conn=Depe
     except ValidationError as exc:
         return _forbidden(f"those windows cannot be stored: {chat._first_error(exc)}")
 
-    return {"ok": True, "state": chat.state_summary(conn, uid)}
+    return {
+        "ok": True,
+        "state": chat.state_summary(conn, uid),
+        # B8: the page re-renders its rows from what the server actually stored.
+        "windows": [window.model_dump(mode="json") for window in windows],
+        "tz": tz,
+    }
 
 
 # --------------------------------------------------------------------- ICS upload
@@ -637,7 +718,9 @@ async def upload_ics(request: Request, user=Depends(require_session), conn=Depen
         busy = parse_ics(text, tz)
         items = free_windows(busy, tz, _utc(db.utcnow()))
     except _Reject as exc:
-        return JSONResponse(status_code=exc.status, content={"error": exc.code, "detail": exc.detail})
+        content = {"error": exc.code, "detail": exc.detail}
+        content.update(exc.extra)
+        return JSONResponse(status_code=exc.status, content=content)
 
     pending_id = _store_ics_pending(conn, uid, items, tz, captured)
     return {

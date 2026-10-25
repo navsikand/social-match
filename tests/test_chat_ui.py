@@ -73,7 +73,8 @@ def test_chat_page_shows_banner_when_ai_unconfigured(client, monkeypatch):
     res = client.get("/chat")
     assert res.status_code == 200
     assert "The assistant is not configured" in res.text
-    assert "AI_API_URL" in res.text
+    # C3: operator-only env names are not student UI.
+    assert "AI_API_URL" not in res.text
     # The composer is hidden entirely when chat is off.
     assert 'id="composer"' not in res.text
     assert 'id="composer-text"' not in res.text
@@ -89,7 +90,10 @@ def test_chat_page_hides_banner_and_wires_content_field_when_configured(client, 
     assert res.status_code == 200
     assert "The assistant is not configured" not in res.text
     assert 'id="composer"' in res.text
-    assert "fake-model-1" in res.text
+    # C3: the page must not print the model id (or the provider URL) to a student; it only
+    # tells them the assistant is connected.
+    assert "fake-model-1" not in res.text
+    assert "Your assistant is connected." in res.text
 
     # chat.py's POST handler reads {"content": ...}; the composer must send exactly that.
     assert 'JSON.stringify({content: text})' in res.text
@@ -230,6 +234,21 @@ def _template_block(html: str, template_id: str) -> str:
     return html[start:end]
 
 
+def _function_body(html: str, name: str) -> str:
+    """The brace-balanced body of `function name(...) { ... }` in rendered inline JS."""
+    at = html.index("function " + name + "(")
+    start = html.index("{", at)
+    depth = 0
+    for i in range(start, len(html)):
+        if html[i] == "{":
+            depth += 1
+        elif html[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return html[start : i + 1]
+    raise AssertionError(f"unbalanced function {name}")
+
+
 def test_chat_page_negotiations_panel_and_offer_respond_controls(client, monkeypatch):
     monkeypatch.setattr(config, "ai_api_url", lambda: FAKE_AI_URL)
     uid = util.mk_user("ui-offers@example.com", "Off")
@@ -349,3 +368,217 @@ def test_chat_pending_renders_sections_and_routes_ics_confirm(client):
     assert '"/api/chat/confirm", body: cancel ? {id: id, cancel: true} : {id: id}' in html
     # The preview kind decides the route; it is read back off the rendered box.
     assert "pendingBox.dataset.pendingKind = kind;" in html
+
+
+# ------------------------------------------------ A8: live status sits by the composer
+
+def test_chat_status_is_announced_and_sits_above_the_composer(client, monkeypatch):
+    monkeypatch.setattr(config, "ai_api_url", lambda: FAKE_AI_URL)
+    uid = util.mk_user("ui-a8@example.com", "Ate")
+    util.direct_session(client, uid)
+    html = _chat_html(client)
+
+    status_at = html.index('id="chat-status"')
+    assert 'role="status" aria-live="polite"' in html[status_at:html.index(">", status_at)]
+    # Below the pending card, directly above the composer.
+    assert html.index('id="pending"') < status_at < html.index('id="composer"')
+
+
+# ---------------------------------------------- A7: Cancel + first-token watchdog
+
+def test_chat_has_cancel_watchdog_and_no_rollback_promise(client, monkeypatch):
+    monkeypatch.setattr(config, "ai_api_url", lambda: FAKE_AI_URL)
+    uid = util.mk_user("ui-a7@example.com", "Can")
+    util.direct_session(client, uid)
+    html = _chat_html(client)
+
+    assert 'id="cancel-turn"' in html
+    assert "abortController.abort();" in html
+    assert "Still waiting on the model… Cancel?" in html
+    assert "Stopped waiting — check the transcript for what the server recorded." in html
+    # An aborted read is not proof the server stopped: never promise a rollback.
+    abort_branch = html.split('err.name === "AbortError"', 1)[1].split("return;", 1)[0]
+    abort_copy = abort_branch.split('notify("', 1)[1].split('"', 1)[0].lower()
+    assert "rollback" not in abort_copy
+    assert "nothing was saved" not in abort_copy
+
+
+# ------------------------------------------- A9: expiry is rendered and Confirm goes dead
+
+def test_chat_pending_shows_expiry_and_disables_confirm(client):
+    uid = util.mk_user("ui-a9@example.com", "Exp")
+    util.direct_session(client, uid)
+    html = _chat_html(client)
+
+    assert 'id="pending-expiry"' in html
+    tick = _function_body(html, "tick")
+    expired = tick.split("if (when.getTime() - Date.now() <= 0) {", 1)[1]
+    # The disable is inside the expired branch, after the copy the student reads, and a live
+    # preview re-enables Confirm. A bare "confirm.disabled = true" string would pass even if
+    # it sat on every render, which is the bug this pins.
+    assert expired.index('pendingExpiry.textContent = "This preview expired — ask again.";') < expired.index(
+        "confirm.disabled = true;"
+    )
+    alive = tick.split("return;", 1)[1]
+    assert '"expires at " + label' in alive
+    assert "confirm.disabled = false;" in alive
+
+
+# ------------------------------------------------- B1: visible-page history polling
+
+def test_chat_poller_skips_hidden_and_overlapping_and_drops_stale_responses(client):
+    """REGRESSION-3/4 (structural: pytest cannot execute this inline JS).
+
+    Encodes the shared poll pattern: skip a hidden tab, never overlap a request, serialise
+    with a sequence number, and drop a response that lost the race to a newer request.
+    """
+    uid = util.mk_user("ui-b1@example.com", "Pol")
+    util.direct_session(client, uid)
+    html = _chat_html(client)
+
+    assert "setInterval(pollHistory, 20000)" in html
+    poll = _function_body(html, "pollHistory")
+    assert "document.hidden" in poll
+    assert "pollInFlight" in poll
+    assert poll.index("pollInFlight = true") < poll.index('fetch("/api/chat/history"')
+    assert "const seq = ++pollSeq;" in poll
+    # A stale response (a newer request already started) never reaches the renderer.
+    assert "if (seq !== pollSeq) return;" in poll
+    assert "function payloadHash(data) {" in html
+    assert "if (hash !== lastPayloadHash) {" in poll
+    assert "refreshNegotiations();" in poll
+    # Visibility resume re-enters through the same guarded poller.
+    resume = html.split('document.addEventListener("visibilitychange"', 1)[1]
+    assert "if (!document.hidden) pollHistory();" in resume.split("});", 1)[0]
+
+
+def test_chat_poll_rechecks_turn_ownership_after_the_await(client):
+    """REGRESSION-3 (structural): a turn started during the fetch must not be erased.
+
+    The ownership check must appear AFTER the await and immediately before renderHistory.
+    """
+    uid = util.mk_user("ui-b1b@example.com", "Pol")
+    util.direct_session(client, uid)
+    html = _chat_html(client)
+
+    poll = _function_body(html, "pollHistory")
+    fetch_at = poll.index('fetch("/api/chat/history"')
+    render_at = poll.index("await renderHistory(data)")
+    recheck_at = poll.index("if (seq !== pollSeq || abortController) return;", fetch_at)
+    assert fetch_at < recheck_at < render_at
+    # The re-check is what gates the hash update; without it a started turn's live row is wiped.
+    assert recheck_at < poll.index("const hash = payloadHash(data);") < render_at
+
+
+# --------------------------------- B6/B9: re-check the offer, keep the form on failure
+
+def test_chat_offer_response_rechecks_state_and_keeps_the_form_on_failure(client):
+    uid = util.mk_user("ui-b6@example.com", "Off")
+    util.direct_session(client, uid)
+    html = _chat_html(client)
+
+    respond = _function_body(html, "respondOffer")
+    assert respond.index("fresh.activity.offer_id !== body.offer_id") < respond.index(
+        "postJSON(OFFER_RESPOND_URL"
+    )
+    # Only a saved response refreshes (an error keeps the Counter/Pass form the student filled).
+    assert "showOfferError(item.candidate_id, message);" in respond
+    assert "if (saved) {" in respond
+    assert "refreshNegotiations();" in respond.split("if (saved) {", 1)[1]
+    # Polling must not silently rebuild an identical panel either.
+    assert "if (signature === negotiationsSignature) {" in html
+
+
+def test_chat_negotiation_poll_preserves_drafts_and_keeps_cards_on_read_failure(client):
+    """REGRESSION-2 (structural: pytest cannot execute this inline JS).
+
+    A re-render must restore each candidate's in-progress Counter/Pass form, and a failed
+    dashboard read must return before the list is cleared.
+    """
+    uid = util.mk_user("ui-b9@example.com", "Draft")
+    util.direct_session(client, uid)
+    html = _chat_html(client)
+
+    assert "const negotiationDrafts = {};" in html
+    controls = _function_body(html, "offerControls")
+    # Restored per candidate, not globally.
+    assert 'negotiationDrafts[String(item.candidate_id)]' in controls
+    assert "if (draft.tag) tagField.select.value = draft.tag;" in controls
+    assert "if (draft.url) urlInput.value = draft.url;" in controls
+    assert "if (draft.reason) reasonField.select.value = draft.reason;" in controls
+    assert 'if (draft.open === "counter") counterBox.hidden = false;' in controls
+    # And every edit is written back before the poll can rebuild the panel.
+    assert "saveDraft(item.candidate_id, {tag: tagField.select.value});" in controls
+    assert "saveDraft(item.candidate_id, {url: urlInput.value});" in controls
+    assert 'saveDraft(item.candidate_id, {open: passBox.hidden ? null : "pass"});' in controls
+
+    refresh = _function_body(html, "refreshNegotiations")
+    assert "let loaded = false;" in refresh
+    # Release-blocking 2: completeness, not mere success, gates the render — one failed
+    # per-candidate read must not drop that card and its draft.
+    assert "let complete = true;" in refresh
+    assert "loaded = complete;" in refresh
+    assert "if (!loaded) return;" in refresh
+    # The retain-on-failure guard must precede the destructive clear.
+    assert refresh.index("if (!loaded) return;") < refresh.index(
+        'negotiationsList.textContent = "";'
+    )
+    # A successful response clears the per-candidate draft only after it was sent.
+    assert "clearDraft(item.candidate_id);" in _function_body(html, "respondOffer")
+    assert "delete negotiationDrafts[String(candidateId)];" in _function_body(html, "clearDraft")
+
+
+# ------------------------------------- B10: Clear history is disabled during a turn
+
+def test_chat_clear_history_is_disabled_while_a_turn_is_in_flight(client):
+    uid = util.mk_user("ui-b10@example.com", "Cle")
+    util.direct_session(client, uid)
+    html = _chat_html(client)
+
+    assert "function setClearBusy(busy) {" in html
+    assert "setClearBusy(true);" in html
+    assert "setClearBusy(false);" in html
+    assert 'notify("Can\'t clear history while the assistant is replying' in html
+
+
+# ---------------------------------------------------- C1: rejected send is recovered
+
+
+def test_chat_rejected_send_drops_the_optimistic_bubble_and_restores_text(client, monkeypatch):
+    monkeypatch.setattr(config, "ai_api_url", lambda: FAKE_AI_URL)
+    uid = util.mk_user("ui-c1@example.com", "Rej")
+    util.direct_session(client, uid)
+    html = _chat_html(client)
+
+    assert "const userRow = messageRow(\"user\", text);" in html
+    send = html.split("async function sendTurn(text) {", 1)[1]
+    assert "userRow.remove();" in send
+    assert "restoreText = true;" in send
+    assert "textarea.value = restoreText ? text : \"\";" in html
+
+
+# ------------------------------------------ D1: transcript silent, one announcement
+
+def test_chat_transcript_is_not_live_and_completed_reply_is_announced_once(client):
+    uid = util.mk_user("ui-d1@example.com", "Ann")
+    util.direct_session(client, uid)
+    html = _chat_html(client)
+
+    at = html.index('id="transcript"')
+    assert 'aria-live="off"' in html[at:html.index(">", at)]
+    assert 'id="chat-announcer" role="log" aria-live="polite"' in html
+    assert 'announcer.textContent = "Assistant replied: " + finalText;' in html
+
+
+# ---------------------------------------- C3/C9: names, no raw ids, links to plans
+
+def test_chat_uses_the_counterpart_name_and_links_to_matches(client):
+    uid = util.mk_user("ui-c3@example.com", "Nam")
+    util.direct_session(client, uid)
+    html = _chat_html(client)
+
+    assert "Match #" not in html
+    assert 'item.about || "This match"' in html
+    assert "AI_API_URL" not in html
+    assert 'plans.href = "/matches";' in html
+    assert 'notifyWithLink("Offer accepted' in html

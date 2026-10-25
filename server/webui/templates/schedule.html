@@ -11,20 +11,23 @@
 <section class="panel" id="manual-panel">
   <h2>Set your windows by hand</h2>
   <label>Your timezone
-    <select id="tz">
-      <option value="America/Los_Angeles" selected>America/Los_Angeles</option>
-      <option value="America/New_York">America/New_York</option>
-      <option value="Europe/London">Europe/London</option>
-      <option value="Europe/Berlin">Europe/Berlin</option>
-      <option value="Asia/Kolkata">Asia/Kolkata</option>
-      <option value="Asia/Singapore">Asia/Singapore</option>
-      <option value="UTC">UTC</option>
+    {% set zones = ["America/Los_Angeles", "America/New_York", "Europe/London", "Europe/Berlin", "Asia/Kolkata", "Asia/Singapore", "UTC"] %}
+    <select id="tz" data-tz-default="{{ tz_default }}">
+      {% for zone in zones %}
+      <option value="{{ zone }}"{% if zone == tz_default %} selected{% endif %}>{{ zone }}</option>
+      {% endfor %}
+      {% if tz_default not in zones %}
+      <option value="{{ tz_default }}" selected>{{ tz_default }}</option>
+      {% endif %}
     </select>
   </label>
   <div id="manual-rows"></div>
+  <p id="manual-load" class="notice" role="status" aria-live="polite" hidden></p>
+  <p><button id="retry-load" class="secondary" type="button" hidden>Retry</button></p>
   <p>
-    <button id="add-row" class="secondary" type="button">Add window</button>
-    <button id="save-manual" class="primary" type="button">Save windows</button>
+    <button id="add-row" class="secondary" type="button" disabled>Add window</button>
+    <button id="save-manual" class="primary" type="button" disabled>Save windows</button>
+    <button id="clear-manual" class="secondary" type="button" disabled>Clear all windows</button>
   </p>
   <p class="muted">Up to 20 windows. Each one lasts at most 8 hours and has to start in the future.
     Saving replaces the whole list — what is on this page is what gets stored.</p>
@@ -39,6 +42,7 @@
     period values are refused with an explanation rather than guessed at; times that fall into a
     daylight-saving gap are refused too. The timezone above is used for times without one.</p>
   <p id="ics-status" class="notice" hidden></p>
+  <div id="ics-details"></div>
 </section>
 
 <section class="panel" id="preview-panel" hidden>
@@ -46,7 +50,7 @@
   <p id="preview-tz" class="muted"></p>
   <div id="preview-list"></div>
   <p>
-    <button id="confirm" class="primary" type="button">Save selected</button>
+    <button id="confirm" class="primary" type="button" disabled>Save selected</button>
     <button id="cancel" class="secondary" type="button">Discard preview</button>
   </p>
   <p id="preview-status" class="notice" hidden></p>
@@ -70,20 +74,66 @@
       body: JSON.stringify({ tz: tz }),
     }).catch(function () { /* kept silent: the form still works with the saved value */ });
     const select = document.getElementById("tz");
-    if (select && tz && Array.from(select.options).some(function (o) { return o.value === tz; })) {
+    if (select && tz) {
+      let known = false;
+      for (const option of select.options) if (option.value === tz) known = true;
+      if (!known) {
+        const option = document.createElement("option");
+        option.value = tz;
+        option.textContent = tz;
+        select.appendChild(option);
+      }
       select.value = tz;
     }
   }());
   const tzSelect = document.getElementById("tz");
   const rows = document.getElementById("manual-rows");
   const manualStatus = document.getElementById("manual-status");
+  const manualLoad = document.getElementById("manual-load");
+  const retryButton = document.getElementById("retry-load");
   const icsStatus = document.getElementById("ics-status");
+  const icsDetails = document.getElementById("ics-details");
+  const clearButton = document.getElementById("clear-manual");
+  const saveButton = document.getElementById("save-manual");
+  const addButton = document.getElementById("add-row");
+  const confirmButton = document.getElementById("confirm");
+  let savingManual = false;
+  // Blocker 1: writes stay closed until /api/schedule/windows has answered. `loaded` is the
+  // single gate; a failed GET leaves no editable row and no enabled write control at all.
+  let loaded = false;
+  let loadedCount = 0;
   const previewPanel = document.getElementById("preview-panel");
   const previewTz = document.getElementById("preview-tz");
   const previewList = document.getElementById("preview-list");
   const previewStatus = document.getElementById("preview-status");
   const MAX_ROWS = 20;
   let pendingId = null;
+
+  // Blocker 3: the stored strings keep their seconds and their own end date. Splitting into
+  // separate parts is only for display; the originals travel in the row's dataset.
+  function splitDate(local) {
+    const text = String(local || "");
+    return text.length >= 10 ? text.slice(0, 10) : "";
+  }
+
+  function splitTime(local) {
+    const text = String(local || "");
+    return text.length >= 16 ? text.slice(11, 16) : "";
+  }
+
+  function iso(local) {
+    // "2026-10-29" + "19:00" -> "2026-10-29T19:00:00" (local wall time; the tz is sent separately)
+    return local.length === 16 ? local + ":00" : local;
+  }
+
+  function rowPart(dateInput, timeInput, original) {
+    const day = dateInput.value;
+    const time = timeInput.value;
+    if (!day || !time) return "";
+    // Untouched inputs submit the ORIGINAL string verbatim, so seconds survive a reload→save.
+    if (original && splitDate(original) === day && splitTime(original) === time) return original;
+    return iso(day + "T" + time);
+  }
 
   function addRow(start, end) {
     if (rows.children.length >= MAX_ROWS) {
@@ -92,74 +142,210 @@
     }
     const row = document.createElement("p");
     row.className = "manual-row";
+    row.dataset.start = start ? String(start) : "";
+    row.dataset.end = end ? String(end) : "";
     const date = document.createElement("input");
     date.type = "date";
     const from = document.createElement("input");
     from.type = "time";
+    const endDate = document.createElement("input");
+    endDate.type = "date";
     const to = document.createElement("input");
     to.type = "time";
     const dateLabel = document.createElement("label");
-    dateLabel.textContent = "Day";
+    dateLabel.textContent = "Start day";
     dateLabel.appendChild(date);
     const fromLabel = document.createElement("label");
-    fromLabel.textContent = "From";
+    fromLabel.textContent = "Start time";
     fromLabel.appendChild(from);
+    const endDateLabel = document.createElement("label");
+    endDateLabel.textContent = "End day";
+    endDateLabel.appendChild(endDate);
     const toLabel = document.createElement("label");
-    toLabel.textContent = "To";
+    toLabel.textContent = "End time";
     toLabel.appendChild(to);
     const drop = document.createElement("button");
     drop.type = "button";
     drop.className = "linklike";
     drop.textContent = "Remove";
-    drop.addEventListener("click", function () { row.remove(); });
+    drop.addEventListener("click", function () {
+      if (savingManual || !loaded) return;
+      row.remove();
+      setControlsEnabled();
+    });
     row.appendChild(dateLabel);
     row.appendChild(fromLabel);
+    row.appendChild(endDateLabel);
     row.appendChild(toLabel);
     row.appendChild(drop);
     rows.appendChild(row);
-    if (start) date.value = start;
-    if (end) from.value = end;
+    if (splitDate(start)) date.value = splitDate(start);
+    if (splitTime(start)) from.value = splitTime(start);
+    // The end date comes from its own input, so an overnight span survives untouched.
+    endDate.value = splitDate(end) || splitDate(start);
+    if (splitTime(end)) to.value = splitTime(end);
+    setControlsEnabled();
   }
 
-  function iso(local) {
-    // "2026-10-29" + "19:00" -> "2026-10-29T19:00:00" (local wall time; the tz is sent separately)
-    return local.length === 16 ? local + ":00" : local;
-  }
-
-  document.getElementById("add-row").addEventListener("click", function () { addRow(); });
-
-  document.getElementById("save-manual").addEventListener("click", async function () {
-    const windows = [];
-    for (const row of rows.children) {
-      const inputs = row.querySelectorAll("input");
-      const day = inputs[0].value;
-      const from = inputs[1].value;
-      const to = inputs[2].value;
-      if (!day && !from && !to) continue;
-      if (!day || !from || !to) {
-        show(manualStatus, "Every row needs a day, a start and an end.", "error");
-        return;
-      }
-      windows.push({start: iso(day + "T" + from), end: iso(day + "T" + to)});
+  function renderRows(windows) {
+    rows.textContent = "";
+    const list = windows || [];
+    loadedCount = list.length;
+    // A blank row is only ever offered once the stored state is KNOWN to be empty.
+    if (list.length === 0) {
+      if (loaded) addRow();
+      return;
     }
-    show(manualStatus, "Saving…", "info");
+    for (const window of list) addRow(window.start, window.end);
+  }
+
+  function ensureTzOption(tz) {
+    if (!tz) return null;
+    for (const option of tzSelect.options) if (option.value === tz) return option;
+    const option = document.createElement("option");
+    option.value = tz;
+    option.textContent = tz;
+    tzSelect.appendChild(option);
+    return option;
+  }
+
+  function selectTz(tz) {
+    if (ensureTzOption(tz)) tzSelect.value = tz;
+  }
+
+  function setControlsEnabled() {
+    const writable = loaded && !savingManual;
+    for (const button of [addButton, saveButton, clearButton]) if (button) button.disabled = !writable;
+    for (const control of rows.querySelectorAll("input, button")) control.disabled = !writable;
+    if (retryButton) retryButton.disabled = loaded;
+    updateConfirmState();
+  }
+
+  function setManualLocked(locked) {
+    savingManual = locked;
+    setControlsEnabled();
+  }
+
+  function loadFailed() {
+    // Unknown state is never rendered as an editable blank schedule.
+    rows.textContent = "";
+    loaded = false;
+    loadedCount = 0;
+    show(manualLoad, "Couldn't load your saved windows — Retry.", "error");
+    if (retryButton) retryButton.hidden = false;
+    setControlsEnabled();
+  }
+
+  function loadSucceeded() {
+    if (manualLoad) manualLoad.hidden = true;
+    if (retryButton) retryButton.hidden = true;
+  }
+
+  async function loadWindows() {
+    loaded = false;
+    setControlsEnabled();
+    try {
+      const res = await fetch("/api/schedule/windows", {headers: {"Accept": "application/json"}});
+      if (res.status === 401) { window.location.href = "/login?next=/schedule"; return; }
+      if (!res.ok) { loadFailed(); return; }
+      const data = await res.json();
+      if (data.tz) selectTz(data.tz);
+      loaded = true;
+      renderRows(data.windows || []);
+      loadSucceeded();
+    } catch (err) {
+      loadFailed();
+      return;
+    }
+    setControlsEnabled();
+  }
+
+  addButton.addEventListener("click", function () {
+    if (savingManual || !loaded) return;
+    addRow();
+  });
+
+  retryButton.addEventListener("click", function () {
+    if (savingManual) return;
+    loadWindows();
+  });
+
+  async function saveWindows(windows, pendingText, doneText) {
+    if (!loaded) return;
+    // Blocker 1: EVERY nonempty -> empty replacement is confirmed here, whichever control
+    // produced it (Save after removing rows, or Clear). There is no unguarded empty POST.
+    if (windows.length === 0 && loadedCount > 0) {
+      const ok = window.confirm(
+        "Delete all " + loadedCount + " saved windows? Matching will have no free time to use "
+          + "until you save new ones. This cannot be undone."
+      );
+      if (!ok) return;
+    }
+    setManualLocked(true);
+    show(manualStatus, pendingText, "info");
     try {
       const out = await postJSON("/api/schedule/windows", {tz: tzSelect.value, windows: windows});
       if (out.res.ok) {
-        const n = (out.data && out.data.state && out.data.state.windows) || 0;
-        show(manualStatus, "Saved. " + n + " window" + (n === 1 ? "" : "s") + " stored.", "ok");
+        const data = out.data || {};
+        if (data.tz) selectTz(data.tz);
+        // The response is authoritative: re-render from it and refresh the known count.
+        renderRows(data.windows || []);
+        const n = (data.state && data.state.windows) || 0;
+        show(manualStatus, doneText(n), "ok");
       } else {
         show(manualStatus, apiError(out.res, out.data), "error");
       }
     } catch (err) {
       show(manualStatus, "Network error — is the server running?", "error");
+    } finally {
+      setManualLocked(false);
     }
+  }
+
+  saveButton.addEventListener("click", async function () {
+    if (!loaded) return;
+    const windows = [];
+    for (const row of rows.children) {
+      const inputs = row.querySelectorAll("input");
+      if (inputs.length < 4) continue;
+      const startDay = inputs[0].value;
+      const startTime = inputs[1].value;
+      const endDay = inputs[2].value;
+      const endTime = inputs[3].value;
+      if (!startDay && !startTime && !endDay && !endTime) continue;
+      if (!startDay || !startTime || !endDay || !endTime) {
+        show(manualStatus, "Every row needs a start day, a start time, an end day and an end time.", "error");
+        return;
+      }
+      windows.push({
+        start: rowPart(inputs[0], inputs[1], row.dataset.start),
+        end: rowPart(inputs[2], inputs[3], row.dataset.end),
+      });
+    }
+    await saveWindows(windows, "Saving…", function (n) {
+      return "Saved. " + n + " window" + (n === 1 ? "" : "s") + " stored.";
+    });
+  });
+
+  clearButton.addEventListener("click", async function () {
+    if (savingManual || !loaded) return;
+    // The confirm lives in saveWindows so the Save path cannot be a bypass.
+    await saveWindows([], "Clearing…", function () {
+      return "All windows cleared.";
+    });
   });
 
   function prettyWindow(item) {
     const start = String(item.start || "");
     const end = String(item.end || "");
     return start.slice(0, 10) + "  " + start.slice(11, 16) + " – " + end.slice(11, 16);
+  }
+
+  function updateConfirmState() {
+    let checked = 0;
+    for (const box of previewList.querySelectorAll("input[type=checkbox]")) if (box.checked) checked++;
+    // Blocker 1: an ICS write stays closed until the saved windows are known too.
+    confirmButton.disabled = !loaded || checked === 0;
   }
 
   function renderPreview(items, tz) {
@@ -177,12 +363,43 @@
       box.type = "checkbox";
       box.checked = true;
       box.value = String(i);
+      box.addEventListener("change", updateConfirmState);
       label.appendChild(box);
       label.appendChild(document.createTextNode(" " + prettyWindow(items[i])));
       previewList.appendChild(label);
     }
     previewPanel.hidden = false;
     previewStatus.hidden = true;
+    updateConfirmState();
+  }
+
+  function clearIcsDetails() {
+    icsDetails.textContent = "";
+  }
+
+  function renderIcsProblems(data) {
+    clearIcsDetails();
+    const problems = (data && data.problems) || [];
+    if (!Array.isArray(problems) || problems.length === 0) return;
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = "Why it was refused";
+    details.appendChild(summary);
+    for (const problem of problems) {
+      const line = document.createElement("p");
+      line.className = "muted";
+      const count = Number(problem.count) || 0;
+      line.textContent = String(problem.property) + " — " + count + " event" + (count === 1 ? "" : "s");
+      details.appendChild(line);
+    }
+    const indices = (data && data.indices) || [];
+    if (Array.isArray(indices) && indices.length > 0) {
+      const line = document.createElement("p");
+      line.className = "muted";
+      line.textContent = "First affected event numbers: " + indices.join(", ");
+      details.appendChild(line);
+    }
+    icsDetails.appendChild(details);
   }
 
   document.getElementById("upload").addEventListener("click", async function () {
@@ -206,14 +423,41 @@
     }
     if (!res.ok) {
       show(icsStatus, apiError(res, data), "error");
+      renderIcsProblems(data);
       previewPanel.hidden = true;
       return;
     }
+    clearIcsDetails();
     pendingId = data.id;
     const count = (data.items || []).length;
     show(icsStatus, "Found " + count + " free window" + (count === 1 ? "" : "s") + ". Tick what you want below.", "ok");
     renderPreview(data.items, data.tz);
   });
+
+  // Regression 1: an ICS confirm rewrites the stored list behind the manual form's back.
+  // Re-fetch and re-render, otherwise the next Save posts the stale (pre-import) rows.
+  async function refreshRows() {
+    // RELEASE-BLOCKING 1: the rows about to be re-fetched are stale the moment an ICS import
+    // lands, so writes must be OFF for the whole refresh. If the refresh fails we stay locked
+    // (Retry is the only way back) — otherwise Save would post the pre-import rows and delete
+    // the freshly imported availability without the nonempty→empty confirm ever firing.
+    loaded = false;
+    setControlsEnabled();
+    try {
+      const res = await fetch("/api/schedule/windows", {headers: {"Accept": "application/json"}});
+      if (res.status === 401) { window.location.href = "/login?next=/schedule"; return; }
+      if (!res.ok) { loadFailed(); return; }
+      const data = await res.json();
+      if (data.tz) selectTz(data.tz);
+      const windows = data.windows || [];
+      loaded = true;
+      loadedCount = windows.length;   // keep the nonempty→empty guard honest after an import
+      renderRows(windows);
+      loadSucceeded();
+    } catch (err) {
+      loadFailed();
+    }
+  }
 
   document.getElementById("confirm").addEventListener("click", async function () {
     if (pendingId === null) return;
@@ -221,6 +465,7 @@
     for (const box of previewList.querySelectorAll("input[type=checkbox]")) {
       if (box.checked) pick.push(parseInt(box.value, 10));
     }
+    confirmButton.disabled = true;
     show(previewStatus, "Saving…", "info");
     try {
       const out = await postJSON("/api/schedule/ics/confirm", {id: pendingId, pick: pick});
@@ -228,11 +473,18 @@
         const n = (out.data && out.data.state && out.data.state.windows) || 0;
         previewPanel.hidden = true;
         pendingId = null;
-        show(icsStatus, "Saved " + n + " window" + (n === 1 ? "" : "s") + ".", "ok");
+        if (out.data && out.data.cancelled) {
+          show(icsStatus, "Nothing selected — your " + n + " saved window" + (n === 1 ? "" : "s") + " are unchanged.", "info");
+        } else {
+          await refreshRows();
+          show(icsStatus, "Saved " + n + " window" + (n === 1 ? "" : "s") + ".", "ok");
+        }
       } else {
+        updateConfirmState();
         show(previewStatus, apiError(out.res, out.data), "error");
       }
     } catch (err) {
+      updateConfirmState();
       show(previewStatus, "Network error — is the server running?", "error");
     }
   });
@@ -254,7 +506,7 @@
   });
 
   (async function () {
-    addRow();
+    await loadWindows();
     try {
       const res = await fetch("/api/schedule/pending", {headers: {"Accept": "application/json"}});
       if (res.status === 401) { window.location.href = "/login?next=/schedule"; return; }
@@ -262,11 +514,9 @@
       const data = await res.json();
       const items = (data && data.items) || [];
       if (items.length === 0) return;
-      if (data.tz) {
-        let known = false;
-        for (const option of tzSelect.options) if (option.value === data.tz) known = true;
-        if (known) tzSelect.value = data.tz;
-      }
+      // Blocker 2: restoring a preview never touches tzSelect — the saved manual rows were
+      // rendered in the stored zone and reinterpreting them would shift their UTC instants.
+      // The preview's own zone is shown in the preview heading instead.
       pendingId = data.id;
       show(icsStatus, "An unsaved upload preview is still open — it expires shortly.", "info");
       renderPreview(items, data.tz);

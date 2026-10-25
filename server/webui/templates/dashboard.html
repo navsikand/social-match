@@ -18,31 +18,49 @@
 {% endblock %}
 {% block scripts %}
 <script>
-  // Placeholder fixture (CONTRACT §11): the dashboard endpoint is owned by a sibling phase,
-  // so the page renders this sample layout when /api/dashboard is missing.
-  const PLACEHOLDER_CANDIDATES = [
-    {candidate_id: null, card_url: "#", state: "open", sample_window: "Thu 19:00–21:00"},
-  ];
-
   const status = document.getElementById("dash-status");
   const list = document.getElementById("dash-list");
+  const photoNotice = document.getElementById("dash-photo");
+
+  // C5: each decision has its own consequence, and the sentence survives the navigation.
+  const OUTCOMES = {
+    declined: "No thanks — this card won't come back, and they aren't told you said no.",
+    blocked: "Blocked — you won't be matched again, and the block is kept for several months.",
+    reported: "Reported to moderation. This card is hidden; a report is not a block.",
+    withdrawn: "Withdrawn — both sides are told the plan is off.",
+  };
+
+  let lastPayload = null;
+  let pollSeq = 0;
+  let pollInFlight = false;
 
   function cardEl(item) {
     const el = document.createElement("article");
     el.className = "card candidate";
+
     const heading = document.createElement("h3");
-    heading.textContent = "Match card " + (item.candidate_id == null ? "" : "#" + item.candidate_id);
+    const about = item.about || {};
+    heading.textContent = about.display_name || "Someone";
+    el.appendChild(heading);
+
     const meta = document.createElement("p");
     meta.className = "muted";
-    meta.textContent = (item.window && (item.window.display || item.window)) ||
-      item.sample_window || "Window available on the card";
-    const state = document.createElement("p");
-    state.className = "pill";
-    state.textContent = item.state || "open";
-    el.appendChild(heading);
+    meta.textContent = (item.window && item.window.display) || "Time to be confirmed";
     el.appendChild(meta);
-    el.appendChild(state);
-    if (item.card_url && item.card_url !== "#") {
+
+    if (item.awaiting_you) {
+      const badge = document.createElement("p");
+      badge.className = "pill";
+      badge.textContent = "Waiting for you to confirm";
+      el.appendChild(badge);
+    } else if (item.awaiting_them) {
+      const badge = document.createElement("p");
+      badge.className = "pill";
+      badge.textContent = "Waiting for them to confirm";
+      el.appendChild(badge);
+    }
+
+    if (item.card_url) {
       const link = document.createElement("a");
       link.className = "button";
       link.href = item.card_url;
@@ -62,28 +80,76 @@
     }
   }
 
-  (async function () {
-    try {
-      const res = await fetch("/api/dashboard", {headers: {"Accept": "application/json"}});
-      if (res.status === 404 || res.status === 401) {
-        render(PLACEHOLDER_CANDIDATES,
-          res.status === 401
-            ? "Your session expired — sign in again."
-            : "The dashboard service isn't connected yet. This is a sample layout.");
-        return;
-      }
-      if (!res.ok) {
-        render(PLACEHOLDER_CANDIDATES, "The dashboard service isn't available yet. This is a sample layout.");
-        return;
-      }
-      const data = await res.json();
-      const items = (data && data.candidates) || [];
-      const photoNotice = document.getElementById("dash-photo");
-      if (photoNotice) photoNotice.hidden = Boolean(data && data.has_photo);
-      render(items);
-    } catch (err) {
-      render(PLACEHOLDER_CANDIDATES, "The dashboard service isn't available yet. This is a sample layout.");
+  function showError(text, retry) {
+    status.className = "notice error";
+    status.textContent = "";
+    status.appendChild(document.createTextNode(text + " "));
+    if (retry) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = "Retry";
+      btn.addEventListener("click", load);
+      status.appendChild(btn);
     }
-  })();
+    status.hidden = false;
+  }
+
+  function showOutcome() {
+    const code = new URLSearchParams(window.location.search).get("outcome");
+    const text = code && OUTCOMES[code];
+    if (!text) return;
+    show(status, text, "ok");
+  }
+
+  async function load() {
+    const seq = ++pollSeq;
+    let res;
+    try {
+      res = await fetch("/api/dashboard", {headers: {"Accept": "application/json"}});
+    } catch (err) {
+      showError("Couldn't load your cards. Check your connection.");
+      return;
+    }
+    // REGRESSION-4: drop a stale response that a newer request already superseded.
+    if (seq !== pollSeq) return;
+    // B7: a dead session goes to sign-in; a broken service says so. Never invent a card.
+    if (res.status === 401) {
+      window.location.href = "/login?next=" + encodeURIComponent("/");
+      return;
+    }
+    let data = null;
+    try { data = await res.json(); } catch (err) { data = null; }
+    if (seq !== pollSeq) return;
+    if (!res.ok) {
+      showError("Couldn't load your cards. " + apiError(res, data), true);
+      return;
+    }
+    if (photoNotice) photoNotice.hidden = Boolean(data && data.has_photo);
+    const key = JSON.stringify(data);
+    if (key === lastPayload) return;
+    lastPayload = key;
+    const items = (data && data.candidates) || [];
+    render(items);
+    showOutcome();
+  }
+
+  load();
+
+  // B1: poll while the tab is visible and on return, re-rendering only on a changed payload.
+  // REGRESSION-4: shared pattern — skip hidden tabs, never overlap, drop stale responses.
+  async function poll() {
+    if (document.hidden || pollInFlight) return;
+    pollInFlight = true;
+    try {
+      await load();
+    } finally {
+      pollInFlight = false;
+    }
+  }
+
+  window.setInterval(poll, 15000);
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) poll();
+  });
 </script>
 {% endblock %}

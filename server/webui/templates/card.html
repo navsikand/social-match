@@ -30,7 +30,7 @@
   <div id="reasons" class="reasons"></div>
   <div id="tags" class="tags"></div>
 
-  <section class="actions">
+  <section class="actions" data-matched-hide="yes no block report counter-toggle">
     <button id="yes" class="yes" type="button">Yes, let's do it</button>
     <button id="no" class="no" type="button">No thanks</button>
     <button id="counter-toggle" class="secondary" type="button">Suggest another time</button>
@@ -75,7 +75,9 @@
   const cardEl = document.getElementById("card");
   const message = document.getElementById("card-message");
   let card = null;
+  let cardName = "";
   let busy = false;
+  let offerPending = false;
 
   const errors = {
     404: "This card isn't open any more — it may already be a confirmed match (check Matches), or it expired.",
@@ -88,13 +90,23 @@
     if (data && data.error === "activity_pending") {
       return "Your agents are still settling what to do. Check back in a bit.";
     }
+    if (data && data.error === "payload_forbidden") {
+      return "Both of you must be free then.";
+    }
+    if (data && data.error === "duplicate_counter") {
+      return "You already suggested exactly that time.";
+    }
     if (errors[res.status]) return errors[res.status];
     return apiError(res, data);
   }
 
   function setBusy(value) {
     busy = value;
-    for (const b of cardEl.querySelectorAll("button")) b.disabled = value;
+    for (const b of cardEl.querySelectorAll("button")) {
+      // A6: while the agents are still negotiating an activity, the backend refuses a
+      // confirmation, so the primary CTA must refuse too.
+      b.disabled = value || (b.id === "yes" && offerPending);
+    }
   }
 
   // Photo path: show the photo when the card carries one, fall back to the preset
@@ -127,6 +139,7 @@
     card = data;
     const about = data.about || {};
     const name = about.display_name || about.pseudonym || "Someone";
+    cardName = name;
     document.getElementById("person").textContent = name;
     // Owner's call: the real name is shown, so the pseudonym line is retired.
     document.getElementById("pseudonym").textContent = "";
@@ -137,11 +150,13 @@
 
     const w = data.window || {};
     document.getElementById("window-display").textContent = w.display || "Time to be confirmed";
-    document.getElementById("window-utc").textContent =
-      w.start_utc && w.end_utc ? w.start_utc + " → " + w.end_utc + " (" + (w.tz || "UTC") + ")" : "";
+    // C3: never print raw UTC instants at a student. The localized line above is the truth;
+    // the machine timestamp stays in the payload where operators can see it.
+    const utcEl = document.getElementById("window-utc");
+    if (utcEl) utcEl.textContent = "";
     if (w.tz) {
-      const tz = document.getElementById("tz");
-      for (const opt of tz.options) if (opt.value === w.tz) tz.value = w.tz;
+      const tz = ensureTzOption(w.tz);
+      tz.value = w.tz;
     }
 
     renderActivity(data.activity);
@@ -196,8 +211,11 @@
     // Already settled? A confirmed plan is not an open card: say so and retire the buttons,
     // instead of letting a stray click fall through to a dead-end 404.
     if (data.state === "matched") {
+      // A3/BLOCKER-4: retiring every button also retired #revoke, while Matches promises the
+      // plan is always one tap from withdrawal. Hide only the decision controls, and let a
+      // polled re-render show the confirmation the first confirmer was still waiting on.
       show(message, "You're already matched — this is a confirmed plan. See Matches.", "ok");
-      for (const b of cardEl.querySelectorAll("button")) b.hidden = true;
+      showConfirmedPlan();
     }
   }
 
@@ -205,7 +223,13 @@
   // and the link is only made clickable when it is a plain https URL.
   function renderActivity(a) {
     const box = document.getElementById("activity");
-    if (!a) { box.hidden = true; return; }
+    if (!a) {
+      box.hidden = true;
+      offerPending = false;
+      document.getElementById("yes").title = "";
+      setBusy(busy);
+      return;
+    }
     const what = String(a.tag || "").replace(/_/g, " ");
     const title = document.getElementById("activity-title");
     const line = document.getElementById("activity-link-line");
@@ -235,6 +259,89 @@
       line.appendChild(link);
     }
     box.hidden = false;
+    // A6: the note's reason is also the CTA's reason, and a polled render restores it.
+    offerPending = a.state === "offered";
+    document.getElementById("yes").title = offerPending ? note.textContent : "";
+    setBusy(busy);
+  }
+
+  // C7 helpers: a datetime-local value has no zone, so it is rendered in the card's zone.
+  function localInput(isoUtc, tz) {
+    if (!isoUtc) return "";
+    const d = new Date(isoUtc);
+    if (isNaN(d.getTime())) return "";
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz || "UTC",
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+    }).formatToParts(d);
+    const get = function (type) {
+      const p = parts.find(function (part) { return part.type === type; });
+      return p ? p.value : "";
+    };
+    return get("year") + "-" + get("month") + "-" + get("day") +
+      "T" + get("hour") + ":" + get("minute");
+  }
+
+  function ensureTzOption(tz) {
+    const sel = document.getElementById("tz");
+    for (const opt of sel.options) if (opt.value === tz) return sel;
+    const opt = document.createElement("option");
+    opt.value = tz;
+    opt.textContent = tz;
+    sel.appendChild(opt);
+    return sel;
+  }
+
+  function prefillCounter() {
+    const w = (card && card.window) || {};
+    const tz = w.tz || "UTC";
+    const sel = ensureTzOption(tz);
+    sel.value = tz;
+    const startEl = document.getElementById("window-start");
+    const endEl = document.getElementById("window-end");
+    if (w.start_utc) startEl.value = localInput(w.start_utc, tz);
+    if (w.end_utc) endEl.value = localInput(w.end_utc, tz);
+    const nowLocal = localInput(new Date().toISOString(), tz);
+    startEl.min = nowLocal;
+    endEl.min = nowLocal;
+  }
+
+  function outcomeLine() {
+    let line = document.getElementById("swipe-outcome");
+    if (line) return line;
+    line = document.createElement("p");
+    line.id = "swipe-outcome";
+    document.querySelector(".actions").appendChild(line);
+    return line;
+  }
+
+  // BLOCKER-4: a settled confirmation retires only the decision controls. Withdrawal stays
+  // reachable from the card, exactly as Matches promises ("always one tap from withdrawal").
+  function hideDecisionControls() {
+    const hideList = document.querySelector("[data-matched-hide]");
+    const ids = hideList ? (hideList.getAttribute("data-matched-hide") || "").split(" ") : [];
+    for (const id of ids) {
+      const b = document.getElementById(id);
+      if (b) b.hidden = true;
+    }
+  }
+
+  function showWaiting(name) {
+    hideDecisionControls();
+    outcomeLine().textContent = "Waiting for " + name + " to confirm.";
+  }
+
+  function showConfirmedPlan() {
+    hideDecisionControls();
+    const line = outcomeLine();
+    // Idempotent: polling may re-render this line, so clear before re-appending the link.
+    line.textContent = "Confirmed: " + ((card.window && card.window.display) || "your plan") + ". ";
+    const a = document.createElement("a");
+    a.className = "button";
+    a.href = "/matches";
+    a.textContent = "See your confirmed plan";
+    line.appendChild(a);
   }
 
   async function swipe(direction) {
@@ -248,19 +355,33 @@
         direction: direction,
       });
       if (out.res.ok) {
-        show(message, direction === "right"
-          ? "Confirmed your side. We'll tell you when they confirm too."
-          : "Done.", "ok");
-        if (direction !== "right") setTimeout(function () { window.location.href = "/"; }, 900);
-        else setTimeout(function () { window.location.href = "/matches"; }, 900);
-      } else {
-        show(message, fail(out.res, out.data), "error");
+        // A2: the destination depends on the returned proposal state, not on the gesture.
+        // B2: the action row stays disabled until the student actually navigates or settles.
+        if (direction === "right") {
+          const state = out.data && out.data.state;
+          if (state === "both_confirmed") {
+            show(message, "You're both in — the plan is confirmed.", "ok");
+            showConfirmedPlan();
+          } else {
+            show(message, "Confirmed your side. Waiting for " + cardName + " to confirm.", "ok");
+            showWaiting(cardName);
+          }
+          // BLOCKER-4: settlement releases the row so polling can deliver the other
+          // confirmation (the decision controls stay hidden; #revoke stays reachable).
+          setBusy(false);
+          return;
+        }
+        // C5: the outcome copy belongs on the destination page, not in a 900 ms flash.
+        const outcome = direction === "left" ? "declined"
+          : direction === "block" ? "blocked" : "reported";
+        window.location.href = "/?outcome=" + outcome;
+        return;
       }
+      show(message, fail(out.res, out.data), "error");
     } catch (err) {
       show(message, "Network error — is the server running?", "error");
-    } finally {
-      setBusy(false);
     }
+    setBusy(false);
   }
 
   async function revoke() {
@@ -271,16 +392,15 @@
     try {
       const out = await postJSON("/api/revoke", {candidate_id: CANDIDATE_ID});
       if (out.res.ok) {
-        show(message, "Withdrawn.", "ok");
-        setTimeout(function () { window.location.href = "/"; }, 900);
-      } else {
-        show(message, fail(out.res, out.data), "error");
+        // C5/B2: both sides are told the plan is off; keep the row disabled until we leave.
+        window.location.href = "/?outcome=withdrawn";
+        return;
       }
+      show(message, fail(out.res, out.data), "error");
     } catch (err) {
       show(message, "Network error — is the server running?", "error");
-    } finally {
-      setBusy(false);
     }
+    setBusy(false);
   }
 
   document.getElementById("yes").addEventListener("click", function () { swipe("right"); });
@@ -294,7 +414,9 @@
   document.getElementById("revoke").addEventListener("click", revoke);
   document.getElementById("counter-toggle").addEventListener("click", function () {
     const form = document.getElementById("counter-form");
+    const opening = form.hidden;
     form.hidden = !form.hidden;
+    if (opening) prefillCounter();
   });
 
   document.getElementById("counter-form").addEventListener("submit", async function (ev) {
@@ -311,32 +433,63 @@
       });
       if (out.res.ok) {
         show(message, "Suggestion sent. The card will update when they respond.", "ok");
-        setTimeout(function () { window.location.reload(); }, 900);
-      } else {
-        show(message, fail(out.res, out.data), "error");
+        window.location.reload();
+        return;
       }
+      show(message, fail(out.res, out.data), "error");
     } catch (err) {
       show(message, "Network error — is the server running?", "error");
-    } finally {
-      setBusy(false);
     }
+    setBusy(false);
   });
 
-  (async function () {
+  let lastPayload = null;
+  let pollSeq = 0;
+  let pollInFlight = false;
+
+  async function loadCard(force) {
+    const seq = ++pollSeq;
     try {
       const res = await fetch("/api/card/" + CANDIDATE_ID, {headers: {"Accept": "application/json"}});
       let data = null;
       try { data = await res.json(); } catch (err) { data = null; }
+      // REGRESSION-4: a slower, older response must never overwrite a newer one.
+      if (seq !== pollSeq) return;
       if (!res.ok) {
         statusEl.className = "notice error";
         statusEl.textContent = fail(res, data);
         return;
       }
+      const key = JSON.stringify(data);
+      // B1: only a changed payload re-renders, so the page never jumps under the student.
+      if (!force && key === lastPayload) return;
+      lastPayload = key;
       render(data || {});
     } catch (err) {
-      statusEl.className = "notice error";
-      statusEl.textContent = "The card service isn't available right now. Try again later.";
+      if (force) {
+        statusEl.className = "notice error";
+        statusEl.textContent = "The card service isn't available right now. Try again later.";
+      }
     }
-  })();
+  }
+
+  // B1/A6: poll while visible so a settled offer re-enables Yes and a second confirmation
+  // reaches the first confirmer without a reload. REGRESSION-4: one shared poll pattern —
+  // skip hidden tabs, never overlap a request, and drop stale responses (see loadCard).
+  async function pollCard() {
+    if (document.hidden || pollInFlight || busy) return;
+    pollInFlight = true;
+    try {
+      await loadCard(false);
+    } finally {
+      pollInFlight = false;
+    }
+  }
+
+  loadCard(true);
+  window.setInterval(pollCard, 15000);
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) pollCard();
+  });
 </script>
 {% endblock %}

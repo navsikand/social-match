@@ -10,16 +10,17 @@
   <header class="topbar">
     <a class="brand" href="/">{% include "_logo.html" %}<span>Social Match</span></a>
     <nav>
+      {% set path = request.url.path %}
       {% if signed_in %}
-        <a href="/chat" class="button primary">Chat</a>
-        <a href="/schedule">Schedule</a>
-        <a href="/">Dashboard</a>
-        <a href="/matches">Matches</a>
-        <a href="/settings">Settings</a>
+        <a href="/chat" class="button primary"{% if path == "/chat" %} aria-current="page"{% endif %}>Chat</a>
+        <a href="/schedule"{% if path == "/schedule" %} aria-current="page"{% endif %}>Schedule</a>
+        <a href="/"{% if path == "/" %} aria-current="page"{% endif %}>Dashboard</a>
+        <a href="/matches"{% if path == "/matches" %} aria-current="page"{% endif %}>Matches</a>
+        <a href="/settings"{% if path == "/settings" %} aria-current="page"{% endif %}>Settings</a>
         <button id="logout-btn" class="linklike" type="button">Sign out</button>
       {% else %}
-        <a href="/login">Sign in</a>
-        <a href="/register">Register</a>
+        <a href="/login"{% if path == "/login" %} aria-current="page"{% endif %}>Sign in</a>
+        <a href="/register"{% if path == "/register" %} aria-current="page"{% endif %}>Register</a>
       {% endif %}
     </nav>
   </header>
@@ -45,20 +46,41 @@
       return {res: res, data: data};
     }
 
+    // C4: the server flattens every error body to {error, detail} at the TOP level, so map
+    // the known codes to plain sentences first and keep the raw detail only as a fallback.
+    const API_ERROR_MESSAGES = {
+      invite_required: "That registration code is not valid.",
+      attest_required: "You must confirm you are 18 or older.",
+      email_taken: "An account with that email already exists.",
+      payload_forbidden: "Some of the details were missing or not allowed. Check the form and try again.",
+      session_invalid: "Your session expired — sign in again.",
+      rate_limited: "Too many attempts just now — wait a moment and try again.",
+    };
+
     function apiError(res, data) {
+      const code = data && data.error;
+      if (typeof code === "string" && API_ERROR_MESSAGES[code]) return API_ERROR_MESSAGES[code];
       const d = data && data.detail;
-      if (d && typeof d === "object" && d.error) {
-        return d.error + (d.detail ? " — " + d.detail : "");
+      if (d && typeof d === "object") {
+        if (typeof d.error === "string" && API_ERROR_MESSAGES[d.error]) return API_ERROR_MESSAGES[d.error];
+        if (d.error) return d.error + (d.detail ? " — " + d.detail : "");
+        if (typeof d.detail === "string" && d.detail) return d.detail;
       }
       if (typeof d === "string" && d) return d;
-      if (data && data.error) return data.error + (data.detail ? " — " + data.detail : "");
+      if (typeof code === "string" && code) return code;
       return "Request failed (" + res.status + ").";
     }
 
+    // D4: every status line is announced. "info" is the in-flight state (aria-busy), an
+    // "error" is assertive, anything else is a polite status.
     function show(el, text, kind) {
       if (!el) return;
+      const isError = kind === "error";
       el.textContent = text;
       el.className = "notice " + (kind || "");
+      el.setAttribute("role", isError ? "alert" : "status");
+      el.setAttribute("aria-live", isError ? "assertive" : "polite");
+      el.setAttribute("aria-busy", kind === "info" ? "true" : "false");
       el.hidden = false;
     }
 

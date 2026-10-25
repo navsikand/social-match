@@ -167,17 +167,43 @@ def dashboard(conn, uid: int) -> dict:
         " ORDER BY id DESC",
         (uid, uid, now),
     )
-    return {
-        "has_photo": has_photo,
-        "candidates": [
+    candidates = []
+    for row in rows:
+        prop = current_proposal(conn, row["id"])
+        # A one-sided confirmation is still an open candidate: the list has to say who is
+        # waiting on whom, or the row reads like nobody has answered yet (audit A2/C6).
+        mine = (
+            prop is not None
+            and db.one(
+                conn,
+                "SELECT 1 FROM proposal_confirmations WHERE proposal_id=? AND user_id=?",
+                (prop["id"], uid),
+            )
+            is not None
+        )
+        awaiting_you = bool(prop is not None and prop["state"] == "a_confirmed" and not mine)
+        awaiting_them = bool(prop is not None and prop["state"] == "a_confirmed" and mine)
+        tz = display_tz(conn, row)
+        candidates.append(
             {
                 "candidate_id": row["id"],
                 "card_url": wording.card_url(row["id"]),
                 "state": row["state"],
+                # C6: a row needs a person and a time, not an internal state word.
+                "about": {"display_name": _display_name(conn, counterpart(row, uid))},
+                "window": {
+                    "display": (
+                        wording.fmt_window(prop["window_start"], prop["window_end"], tz)
+                        if prop is not None
+                        else None
+                    ),
+                    "tz": tz,
+                },
+                "awaiting_you": awaiting_you,
+                "awaiting_them": awaiting_them,
             }
-            for row in rows
-        ]
-    }
+        )
+    return {"has_photo": has_photo, "candidates": candidates}
 
 
 # ------------------------------------------------------------------ matches
@@ -224,21 +250,27 @@ def matches(conn, uid: int) -> dict:
     )
     upcoming: list[tuple[str, dict]] = []
     historical: list[tuple[str, dict]] = []
+    availability_lapsed = False
     for cand in rows:
         about_uid = counterpart(cand, uid)
         if not wording.matching_live(conn, cand["user_a"], cand["user_b"]):
             continue
         if wording.live_grant(conn, about_uid, "publication", "card") is None:
             continue
+        # The plan check comes before the availability gate so a lapsed availability can be
+        # reported as such instead of quietly hiding a plan that exists (audit B4).
+        prop = current_proposal(conn, cand["id"])
+        if prop is None or prop["state"] not in _CONFIRMED_PROPOSAL_STATES:
+            continue
         if (
             availability_live(conn, uid, now) is None
             or availability_live(conn, about_uid, now) is None
         ):
+            # CONTRACT-photos.md forbids retaining identifiable plans past availability
+            # expiry, so the row stays hidden; only an anonymous notice leaves this function.
+            availability_lapsed = True
             continue
         if wording.blocked_pair(conn, cand["user_a"], cand["user_b"]):
-            continue
-        prop = current_proposal(conn, cand["id"])
-        if prop is None or prop["state"] not in _CONFIRMED_PROPOSAL_STATES:
             continue
 
         tz = display_tz(conn, cand)
@@ -275,7 +307,11 @@ def matches(conn, uid: int) -> dict:
     # Upcoming soonest first; history most recent first.
     upcoming.sort(key=lambda pair: pair[0])
     historical.sort(key=lambda pair: pair[0], reverse=True)
-    return {"matches": [item for _, item in upcoming] + [item for _, item in historical]}
+    return {
+        "matches": [item for _, item in upcoming] + [item for _, item in historical],
+        # Anonymous: says a plan was withheld, never who or when.
+        "availability_lapsed": availability_lapsed,
+    }
 
 
 # ------------------------------------------------------------------ card
@@ -581,6 +617,9 @@ def counter(conn, uid: int, candidate_id: int, window_start: str, window_end: st
         old = current_proposal(conn, cand["id"])
         if old is None:
             raise SchedulingError(404, "not_found", "no open proposal")
+        # Double-submit guard (audit B2): the same counter twice must not mint a new version.
+        if old["window_start"] == start and old["window_end"] == end:
+            raise SchedulingError(409, "duplicate_counter", "you already suggested that time")
 
         for who in (cand["user_a"], cand["user_b"]):
             if covering_window(conn, who, start, end, now) is None:

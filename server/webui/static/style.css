@@ -97,6 +97,9 @@ a:hover { color: var(--ink); }
   border-bottom: 2px solid transparent;
 }
 .topbar nav a:hover { color: var(--ink); border-bottom-color: var(--violet); }
+/* D2: the current page is marked for sighted and screen-reader users alike. */
+.topbar nav a[aria-current="page"] { color: var(--ink); border-bottom-color: var(--accent); font-weight: 700; }
+.topbar nav a.button[aria-current="page"] { color: var(--accent-ink); border-bottom-color: transparent; }
 
 /* The Chat entry is a real button, not a nav link: `.topbar nav a` was winning on
    specificity and squashing it to a 0.4rem-padded, underline-on-hover text link.
@@ -182,7 +185,9 @@ button.yes:hover { background: var(--ink); border-color: var(--ink); }
 button.no { background: #fff; border-color: var(--line); }
 button.danger { background: #fff; border-color: #e2b6ae; color: #8c2f22; }
 button.secondary { background: var(--tint); border-color: var(--tint); }
-button.linklike { border: none; background: none; color: var(--muted); padding: 0; min-height: 0; font-weight: 500; white-space: nowrap; }
+/* D2: "Sign out" is a real control, so give it a real tap target (44 px). */
+button.linklike { border: none; background: none; color: var(--muted); padding: 0 0.5rem;
+  min-height: 2.75rem; display: inline-flex; align-items: center; font-weight: 500; white-space: nowrap; }
 button.linklike:hover { color: var(--ink); }
 
 .notice {
@@ -319,8 +324,23 @@ button.linklike:hover { color: var(--ink); }
 }
 
 @media (max-width: 560px) {
-  .topbar { flex-direction: column; align-items: flex-start; }
-  .topbar nav { flex-wrap: wrap; gap: 0.25rem 1.1rem; }
+  /* D2: keep the header to ONE row — brand fixed, nav scrolls horizontally — instead of a
+     2-3 row sticky stack that eats the top of every page. Links keep a 44 px tap target. */
+  .topbar { flex-direction: row; align-items: center; gap: 0.75rem; padding: 0.45rem 1rem; }
+  .topbar .brand { flex: none; }
+  .topbar nav {
+    flex-wrap: nowrap;
+    gap: 0.9rem;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  .topbar nav::-webkit-scrollbar { display: none; }
+  .topbar nav a { display: inline-flex; align-items: center; min-height: 2.75rem; padding: 0 0.15rem; }
+  .topbar nav a.button { min-height: 2.75rem; padding: 0.45rem 1rem; }
+  /* D3: the register/sign-in form must be the first thing on a phone, above the marketing. */
+  .auth { flex-direction: column-reverse; }
   .actions { flex-direction: column; }
   .actions button { width: 100%; }
 }

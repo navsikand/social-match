@@ -13,6 +13,7 @@ import builtins
 import io
 import json
 import os
+import re
 
 import pytest
 from fastapi.testclient import TestClient  # pyright: ignore[reportMissingImports]
@@ -187,6 +188,56 @@ def test_manual_empty_list_clears_every_window(client, signed_in):
     assert r.status_code == 200, r.text
     assert windows_of(uid) == []
     assert notes_of(uid) == [("note", "windows updated: 0 stored")]
+
+
+def test_windows_get_returns_nothing_before_any_save(client, signed_in):
+    r = client.get("/api/schedule/windows")
+    assert r.status_code == 200
+    assert r.json() == {"windows": [], "tz": "UTC"}
+
+
+def test_windows_get_prefills_local_wall_time_after_save(client, signed_in):
+    """A1: the page can load what was stored, so Save is not a blind full replacement."""
+    uid = signed_in
+    body = {
+        "tz": TZ,
+        "windows": [{"start": "2026-10-31T09:00:00", "end": "2026-10-31T10:00:00"}],
+    }
+    saved = client.post("/api/schedule/windows", json=body)
+    assert saved.status_code == 200, saved.text
+    expected = [{"start": "2026-10-31T09:00:00", "end": "2026-10-31T10:00:00", "tz": TZ}]
+    assert saved.json()["windows"] == expected
+
+    got = client.get("/api/schedule/windows")
+    assert got.status_code == 200
+    assert got.json() == {"windows": expected, "tz": TZ}
+
+    # Saving back exactly what GET returned is a no-op, not a wipe or a double shift.
+    again = client.post(
+        "/api/schedule/windows",
+        json={"tz": got.json()["tz"], "windows": [{"start": w["start"], "end": w["end"]} for w in got.json()["windows"]]},
+    )
+    assert again.status_code == 200, again.text
+    assert windows_of(uid) == [(util.to_utc("2026-10-31T09:00:00", TZ),
+                                util.to_utc("2026-10-31T10:00:00", TZ), TZ)]
+
+
+def test_windows_get_requires_a_session(client):
+    r = client.get("/api/schedule/windows")
+    assert r.status_code == 401
+
+
+def test_clear_all_windows_posts_the_empty_list(client, signed_in):
+    """A1: intentional clearing still works through the explicit clear control."""
+    body = {
+        "tz": TZ,
+        "windows": [{"start": "2026-10-31T09:00:00", "end": "2026-10-31T10:00:00"}],
+    }
+    assert client.post("/api/schedule/windows", json=body).status_code == 200
+    cleared = client.post("/api/schedule/windows", json={"tz": TZ, "windows": []})
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["state"]["windows"] == 0
+    assert client.get("/api/schedule/windows").json() == {"windows": [], "tz": "UTC"}
 
 
 def test_manual_rejections(client, signed_in):
@@ -741,6 +792,88 @@ def test_ics_confirm_empty_pick_cancels(client, signed_in):
     assert notes_of(uid) == []
 
 
+def test_ics_confirm_empty_pick_reports_the_untouched_window_count(client, signed_in):
+    """A5: cancelling must report the windows that remain, not "Saved. 0" or "Saved. N"."""
+    uid = signed_in
+    body = {
+        "tz": TZ,
+        "windows": [
+            {"start": "2026-10-31T09:00:00", "end": "2026-10-31T10:00:00"},
+            {"start": "2026-10-31T11:00:00", "end": "2026-10-31T12:00:00"},
+        ],
+    }
+    assert client.post("/api/schedule/windows", json=body).status_code == 200
+    before = windows_of(uid)
+    uploaded = upload(client, ics(utc_event("20261025T180000", "20261025T190000"))).json()
+    r = client.post("/api/schedule/ics/confirm", json={"id": uploaded["id"], "pick": []})
+    assert r.status_code == 200, r.text
+    assert r.json()["cancelled"] is True
+    assert r.json()["state"]["windows"] == 2
+    assert windows_of(uid) == before
+    assert pending_rows(uid) == []
+
+
+def test_ics_refusal_collapses_a_wall_of_errors(client, signed_in):
+    """C8: a many-event export gets per-property counts + the first three indices."""
+    events = "".join(
+        vevent(
+            f"DTSTART;TZID=Europe/Berlin:2026102{index}T180000",
+            f"DTEND;TZID=Europe/Berlin:2026102{index}T190000",
+        )
+        for index in range(1, 10)
+    )
+    r = upload(client, ics(events))
+    assert r.status_code == 422, r.text
+    payload = r.json()
+    assert payload["error"] == "ics_rejected"
+    detail = payload["detail"]
+    assert len(detail) <= schedules._MAX_DETAIL_CHARS, detail
+    assert "TZID" in detail and "×9" in detail, detail
+    assert "1, 2, 3" in detail and "and others" in detail, detail
+    assert "Nothing was stored" in detail
+    counts = {item["property"]: item["count"] for item in payload["problems"]}
+    assert counts == {"DTSTART": 9, "TZID": 9}  # the TZID refusal also leaves the event undated
+    assert payload["indices"] == [1, 2, 3]
+    assert windows_of(signed_in) == []
+
+
+def test_ics_upload_preserves_a_pending_chat_preview(client, signed_in):
+    """B3: an .ics upload supersedes only kind='ics', never a chat kind='windows' preview."""
+    uid = signed_in
+    now = db.utcnow()
+    conn = db.connect()
+    try:
+        with db.immediate(conn):
+            cursor = conn.execute(
+                "INSERT INTO chat_pending (user_id, kind, payload_json, state_hash, created_at,"
+                " expires_at) VALUES (?,?,?,?,?,?)",
+                (
+                    uid,
+                    "windows",
+                    json.dumps({"ops": [{"op": "set_windows", "windows": []}],
+                                "items": {"windows": [], "events": []}}),
+                    "chat-hash",
+                    now,
+                    chat._shift(now, minutes=chat.PENDING_TTL_MINUTES),
+                ),
+            )
+            chat_pending_id = int(cursor.lastrowid)
+    finally:
+        conn.close()
+
+    uploaded = upload(client, ics(utc_event("20261025T180000", "20261025T190000")))
+    assert uploaded.status_code == 200, uploaded.text
+    rows = pending_rows(uid)
+    assert [(row["id"], row["kind"]) for row in rows] == [
+        (chat_pending_id, "windows"),
+        (uploaded.json()["id"], "ics"),
+    ], "the chat preview must survive an .ics upload"
+
+    # The schedule preview endpoint still sees only its own row.
+    got = client.get("/api/schedule/pending").json()
+    assert got["id"] == uploaded.json()["id"]
+
+
 def test_ics_confirm_rejections(client, signed_in):
     uid = signed_in
     uploaded = upload(client, ics(utc_event("20261025T180000", "20261025T190000"))).json()
@@ -1003,17 +1136,237 @@ def test_calendar_text_never_reaches_the_database(client, signed_in):
 # ------------------------------------------------------------------ template
 
 
-def test_schedule_template_renders_with_the_base_layout():
+def _render_schedule(tz_default="UTC"):
     from pathlib import Path
+    from types import SimpleNamespace
 
     from jinja2 import Environment, FileSystemLoader
 
     templates = Path(schedules.__file__).parent / "webui" / "templates"
     env = Environment(loader=FileSystemLoader(str(templates)), autoescape=True)
-    rendered = env.get_template("schedule.html").render(signed_in=True)
+    request = SimpleNamespace(url=SimpleNamespace(path="/schedule"))
+    return env.get_template("schedule.html").render(
+        signed_in=True, tz_default=tz_default, request=request
+    )
+
+
+def test_schedule_template_renders_with_the_base_layout():
+    rendered = _render_schedule()
     assert 'extends "base.html"' not in rendered  # the heredoc did not leak
     assert 'id="save-manual"' in rendered
     assert 'id="ics-file"' in rendered
     assert 'id="preview-panel"' in rendered
     assert "America/Los_Angeles" in rendered
     assert "<script>" in rendered
+
+
+def _schedule_script() -> str:
+    rendered = _render_schedule()
+    blocks = re.findall(r"<script>(.*?)</script>", rendered, re.S)
+    assert blocks, "the schedule template must expose its inline script"
+    # base.html has its own <script>; the page's own block is the last one.
+    return blocks[-1]
+
+
+def _brace_block(source: str, open_brace: int) -> str:
+    depth = 0
+    for index in range(open_brace, len(source)):
+        char = source[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[open_brace : index + 1]
+    raise AssertionError("unbalanced braces in the inline script")
+
+
+def _js_function(source: str, name: str) -> str:
+    """The body of a `function name(...) { ... }` declaration, by brace matching.
+
+    STRUCTURAL TEST helper: pytest runs Python only, so the UI invariants below are asserted
+    against the extracted function text rather than by executing JavaScript. The assertions are
+    still behavioural claims about what the function does (which value it posts, which gate it
+    checks, which branch calls the refresh), not "this string exists somewhere in the file".
+    """
+    start = source.index("function " + name + "(")
+    return _brace_block(source, source.index("{", start))
+
+
+def _js_handler(source: str, marker: str) -> str:
+    """The callback body after an addEventListener marker, by brace matching."""
+    start = source.index(marker)
+    return _brace_block(source, source.index("{", start))
+
+
+def test_schedule_write_controls_are_gated_until_the_load_succeeds():
+    """Blocker 1 (structural): a failed GET must not leave an editable empty schedule."""
+    rendered = _render_schedule()
+    # The static markup ships disabled, so even before the fetch settles no write is possible.
+    for control in ("add-row", "save-manual", "clear-manual", "confirm"):
+        tag = re.search(r'<button id="' + control + r'"[^>]*>', rendered)
+        assert tag is not None, control
+        assert "disabled" in tag.group(0), control
+    assert 'id="manual-load"' in rendered
+    assert 'id="retry-load"' in rendered
+
+    script = _schedule_script()
+    # The unknown-state path can never fall back to rendering an editable blank row.
+    assert "renderRows([])" not in script
+    load_failed = _js_function(script, "loadFailed")
+    assert "renderRows(" not in load_failed
+    assert 'rows.textContent = ""' in load_failed
+    assert "loaded = false;" in load_failed
+    assert "Couldn't load your saved windows — Retry." in load_failed
+    assert "show(manualLoad," in load_failed
+    assert "retryButton.hidden = false" in load_failed
+
+    # One gate drives every write control; it is keyed off `loaded`, not just the in-flight flag.
+    gate = _js_function(script, "setControlsEnabled")
+    assert "const writable = loaded && !savingManual;" in gate
+    assert "for (const button of [addButton, saveButton, clearButton])" in gate
+    assert "button.disabled = !writable;" in gate
+    assert 'rows.querySelectorAll("input, button")' in gate
+
+    # The ICS confirm is a write too: selection alone cannot open it while state is unknown.
+    confirm_state = _js_function(script, "updateConfirmState")
+    assert "confirmButton.disabled = !loaded || checked === 0;" in confirm_state
+
+    # And the load path re-runs on Retry.
+    retry = _js_handler(script, 'retryButton.addEventListener("click"')
+    assert "loadWindows();" in retry
+
+
+def test_schedule_reload_save_round_trip_keeps_seconds_and_overnight_spans(client, signed_in):
+    """Blocker 3: a genuine reload->save no-op, including seconds and an overnight window."""
+    uid = signed_in
+    windows = [
+        {"start": "2026-10-31T22:15:30", "end": "2026-11-01T02:45:10"},
+        {"start": "2026-11-02T09:05:07", "end": "2026-11-02T10:06:08"},
+    ]
+    saved = client.post("/api/schedule/windows", json={"tz": TZ, "windows": windows})
+    assert saved.status_code == 200, saved.text
+    before = windows_of(uid)
+    assert len(before) == 2
+
+    got = client.get("/api/schedule/windows").json()
+    # The GET carries full seconds and the second (overnight) window keeps its own end date.
+    assert got["windows"][0] == {"start": "2026-10-31T22:15:30", "end": "2026-11-01T02:45:10", "tz": TZ}
+    assert got["windows"][0]["end"][:10] != got["windows"][0]["start"][:10]
+    assert got["windows"][1]["start"].endswith(":07")
+
+    # Posting back exactly what GET returned is byte-for-byte the same stored instants.
+    again = client.post(
+        "/api/schedule/windows",
+        json={"tz": got["tz"], "windows": [{"start": w["start"], "end": w["end"]} for w in got["windows"]]},
+    )
+    assert again.status_code == 200, again.text
+    assert windows_of(uid) == before
+
+
+def test_schedule_row_payload_uses_the_stored_full_datetimes():
+    """Blocker 3 (structural): four inputs per row, originals kept in dataset, verbatim reuse."""
+    script = _schedule_script()
+    add_row = _js_function(script, "addRow")
+    assert "row.dataset.start = start ? String(start) : \"\";" in add_row
+    assert "row.dataset.end = end ? String(end) : \"\";" in add_row
+    # Start day/time AND end day/time are separate controls, so overnight spans are editable.
+    assert add_row.count("document.createElement(\"input\")") == 4
+    assert "endDate.value = splitDate(end) || splitDate(start);" in add_row
+    # The cap is untouched.
+    assert "const MAX_ROWS = 20;" in script
+    assert "rows.children.length >= MAX_ROWS" in add_row
+
+    # Unchanged inputs re-submit the stored string verbatim (seconds preserved).
+    row_part = _js_function(script, "rowPart")
+    assert "if (original && splitDate(original) === day && splitTime(original) === time) return original;" in row_part
+    assert "return iso(day + \"T\" + time);" in row_part
+
+    # Submit composes each half from its own date+time inputs and the row's stored original.
+    submit = _js_handler(script, 'saveButton.addEventListener("click"')
+    assert "rowPart(inputs[0], inputs[1], row.dataset.start)" in submit
+    assert "rowPart(inputs[2], inputs[3], row.dataset.end)" in submit
+    assert "if (inputs.length < 4) continue;" in submit
+
+
+def test_schedule_preview_restore_never_changes_the_timezone_control():
+    """Blocker 2 (structural): restoring a preview leaves tzSelect alone and names its zone."""
+    script = _schedule_script()
+    restore = script[script.index('fetch("/api/schedule/pending"'):]
+    assert "selectTz(" not in restore
+    assert "tzSelect.value =" not in restore
+    # The preview heading carries the preview's own zone instead.
+    render_preview = _js_function(script, "renderPreview")
+    assert 'previewTz.textContent = "Times are local wall time in " + tz' in render_preview
+    # Control: the initial load of the SAVED windows may still select the stored zone.
+    assert "selectTz(data.tz)" in _js_function(script, "loadWindows")
+
+
+def test_schedule_every_empty_replacement_is_confirmed():
+    """Blocker 1 (structural): the confirm lives on the one write path both controls use."""
+    script = _schedule_script()
+    save = _js_function(script, "saveWindows")
+    guard = 'if (windows.length === 0 && loadedCount > 0) {'
+    assert guard in save
+    assert save.index(guard) < save.index("window.confirm(") < save.index("postJSON(")
+    assert '"Delete all " + loadedCount + " saved windows?' in save
+    assert "if (!ok) return;" in save
+
+    # Both the Save button and the Clear button funnel through that guarded path...
+    save_click = _js_handler(script, 'saveButton.addEventListener("click"')
+    clear_click = _js_handler(script, 'clearButton.addEventListener("click"')
+    assert "saveWindows(windows," in save_click
+    assert "saveWindows([]," in clear_click
+    # ...and Clear has no private confirm that could let a future caller bypass the guard.
+    assert "window.confirm(" not in clear_click
+
+    # The count that drives the guard is the number of windows last rendered from the server.
+    render_rows = _js_function(script, "renderRows")
+    assert "loadedCount = list.length;" in render_rows
+
+
+def test_schedule_post_ics_confirm_refreshes_the_manual_rows():
+    """Regression 1 (structural): a successful ICS import re-fetches before the next Save."""
+    script = _schedule_script()
+    confirm_click = _js_handler(script, 'document.getElementById("confirm").addEventListener')
+    cancelled = confirm_click.index("out.data.cancelled")
+    assert cancelled < confirm_click.index("refreshRows();") < confirm_click.index('show(icsStatus, "Saved "')
+    assert "await refreshRows();" in confirm_click
+
+    refresh = _js_function(script, "refreshRows")
+    assert 'fetch("/api/schedule/windows"' in refresh
+    # Release-blocking 1: the refresh locks writes first, then renders from the fetched list
+    # and keeps loadedCount honest so a later empty save still asks for confirmation.
+    assert "loaded = false;" in refresh
+    assert "setControlsEnabled();" in refresh
+    assert "renderRows(windows);" in refresh
+    assert "loadedCount = windows.length;" in refresh
+    assert "loadFailed();" in refresh
+    # A manual save already returns the authoritative list: it re-renders without a second GET.
+    assert "renderRows(data.windows || []);" in _js_function(script, "saveWindows")
+
+
+def test_schedule_template_has_prefill_clear_and_cancelled_controls():
+    """A1/A5/B8/C2/C8 UI contract, pinned in the one template this lane owns."""
+    rendered = _render_schedule(tz_default="Pacific/Auckland")
+    # A1: stored windows are fetched and prefilled; clearing is explicit and confirmed.
+    assert 'fetch("/api/schedule/windows"' in rendered
+    assert 'id="clear-manual"' in rendered
+    assert "window.confirm(" in rendered
+    assert '"Delete all "' in rendered
+    assert "renderRows(data.windows" in rendered
+    # C2: the server-provided default is selected, even outside the seven common zones.
+    assert 'data-tz-default="Pacific/Auckland"' in rendered
+    assert 'value="Pacific/Auckland" selected' in rendered
+    # C2: a missing browser zone is inserted rather than silently ignored.
+    assert "select.appendChild(option)" in rendered
+    # A5: cancelled copy is honest and zero selections disable the save.
+    assert "Nothing selected" in rendered
+    assert "are unchanged" in rendered
+    assert "confirmButton.disabled = !loaded || checked === 0" in rendered
+    # B8: rows lock while a save is in flight and re-render from the response.
+    assert "setManualLocked(true)" in rendered
+    assert 'rows.querySelectorAll("input, button")' in rendered
+    # C8: refusals collapse into a details block instead of a semicolon wall.
+    assert "renderIcsProblems(data)" in rendered
+    assert 'document.createElement("details")' in rendered
