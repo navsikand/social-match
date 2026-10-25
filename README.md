@@ -1,226 +1,204 @@
-# Social Match — Track 2 hackathon entry
+# Social Match
 
-Sign in, talk to your own AI assistant, and let two assistants **find where your free time and interests overlap and
-agree on one real thing to do** (a climbing session, a coffee) through our broker server. Neither student's calendar,
-courses or grades is stored anywhere but their own device: the chat path takes windows you type, or an `.ics` you upload
-that the server reads once in memory and reduces to intervals before storing anything. What crosses the wire is a handful
-of time ranges, a few interest tags (canonicalised on the server), answers to five consent questions, and — if you use
-the chat — the text you type to your own assistant.
+**Your assistant does all the foreplay: it finds the free slot, proposes it, and waits for your explicit yes.**
 
-The division of labour is the whole idea:
+Two students' AI assistants find where their free time and interests overlap, negotiate one real thing to do
+(a climbing session, a coffee), and hand the humans a single decision: **Confirm**, or not. It is Track 2
+(agent-to-agent coordination), and the whole product is built around one rule — *an agent may propose, but a
+human is the only thing that can confirm.*
+
+Nobody's calendar, courses, grades or transcript leaves their own account. What crosses the wire is a handful of
+time ranges, a few interest tags, a consent block, and a server-templated note of four fixed fields.
+
+---
+
+## The loop
+
+```
+1. Tell your assistant when you're free     →  preview card  →  you press Confirm (the click is the provenance)
+2. The matcher looks for overlap            →  one card per person, over the LONGEST overlap, 30 min minimum
+3. Both assistants negotiate an activity    →  offer → accept / counter / pass(+reason code), 3 rounds max
+4. Both humans swipe                         →  a confirmation is a signed-in press; nothing is "on" until both
+5. A plan exists                             →  withdrawable at any time from the card
+```
+
+Steps 3 and 4 are the interesting part: the agents argue about *what* to do, and the humans keep the veto over
+*whether*. A message never says "you're on" until the second side confirms — a test fails the build if that
+word appears early.
+
+## What we built
 
 | Piece | Role |
 | --- | --- |
-| **Our chat app** | the interface. You tell your assistant when you are free (or upload an `.ics`), it shows you a normalised preview, you press Confirm, and the chips and Settings page show what actually changed. |
-| **Your assistant** | your agent. It reads your own state, applies changes through the server's validated write path, and — if you delegate — accepts, counters or passes offers against the other student's assistant. |
-| **Our server** | the broker. It validates every write against an allowlist, decides who overlaps whom, runs the five consent grants, feeds the model provider on your behalf, and owns every piece of state and every retention clock. |
-| **The website (same app)** | where the card, the swipe and the confirm live. A confirmation is a signed-in press; no assistant can swipe or confirm for you. |
-
-The product rationale is in `FLOW.md`. The implementation contract, section by section, is `CONTRACT.md` (its §16
-"honesty ledger" is binding on this README and on everything under `docs/`); the chat surfaces are specified in
-`CONTRACT-chat.md` and `PLAN-chat-frontend.md`.
+| **The chat app** | the interface. Talk to your own assistant; anything touching availability or events comes back as a normalised **preview** you Confirm. |
+| **Your assistant** | your agent. Reads your own state, writes through the server's validated path, and — only if you delegate — answers the *other* assistant's offers. |
+| **The broker (this server)** | validates every write against an allowlist, decides who overlaps whom, runs the consent grants, feeds the model provider on your behalf, owns every retention clock. |
+| **The card / matches pages** | the human half: swipe, counter, withdraw. No assistant can do these for you. |
 
 ## Quickstart
 
 ```bash
-uv sync                                   # install the server (Python >= 3.11)
-cp .env.example .env                      # every value optional; defaults shown in the file
-uv run uvicorn server.app:app --reload    # http://localhost:8000
-uv run pytest -q                          # 273 tests before the chat lanes, a few seconds
+uv sync                                          # Python >= 3.11
+cp .env.example .env                             # everything optional; see Configuration
+uv run uvicorn server.app:app --reload           # http://localhost:8000
+uv run pytest -q                                 # 544 tests, ~10 s
+uv run python demo/scenario.py                   # 17 asserted beats over the real HTTP API
 ```
 
-Then open <http://localhost:8000/register>, enter the invite code (`REGISTRATION_CODE`, default `socialmatch2026`), tick the
-18+ attestation, and you land on the chat page: talk to your assistant, define your schedule by hand or by `.ics`, and
-the dashboard, card, swipe, matches, settings and legacy inbox pages are all there.
+Open <http://localhost:8000/register>, use the invite code (`REGISTRATION_CODE`, default `socialmatch2026`), tick the
+18+ attestation, and upload a photo — **a photo is required before anyone is matchable**, by design.
 
-> Run the end-to-end demo with `uv run python demo/scenario.py` — seventeen asserted beats over the
-> real HTTP API (register → pair → state → match → card → confirm → idempotent re-confirm →
-> revoke → counter → no-overlap → block/report → therapy-payload rejection → manual windows →
-> `.ics` preview → confirm → chat tag apply), ending with the
-> honest "what crossed the wire" summary. For filming against a live server:
-> `uv run python demo/scenario.py --against-url http://localhost:8000`.
+The demo prints an honest "what crossed the wire" summary and exits non-zero on any failed beat. To film against a
+running server: `uv run python demo/scenario.py --against-url http://localhost:8000`.
+
+**Two accounts to see the whole loop:** register two, open `/chat` on both, tell each one *"free weekends"*,
+Confirm both preview cards, then open the Dashboard, swipe right on both sides, and watch the plan appear in
+**Matches**.
 
 ## Configuration
 
-Every value is read at call time (env vars, or `deploy/run.sh`'s `socialmatch.conf`). The chat block:
+Every value is read at call time (env vars, or `deploy/run.sh`'s `socialmatch.conf`).
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `AI_API_URL` | unset | Full POST URL of an **OpenAI chat-completions** endpoint. Unset → chat disabled: the page shows a banner and the POST returns `503 {"error":"ai_unconfigured"}`. |
+| `AI_API_URL` | unset | Full POST URL of an **OpenAI chat-completions** endpoint. Unset → chat disabled (banner + `503 ai_unconfigured`). |
 | `AI_API_KEY` | unset | Bearer key for that provider. Never sent to the browser. |
-| `AI_MODEL` | no code default; `.env.example` ships `z-ai/glm-5.3`, provisional until one live turn confirms the name | Model name in the request body. |
-| `AI_MAX_TOKENS` | `800` | Reply cap sent to the provider. |
-| `AI_TIMEOUT_SECONDS` | `60` | Wall-clock limit for one turn. |
-| `AI_TTL_DAYS` | `7` | Chat-transcript retention. Matches the demo retention table; the rate-limit rows outlive it. |
-| `DELEGATION_DEFAULT_ON` | off when absent; `.env.example` ships `1` for the demo box | `1` seeds the **delegation** grant (version 1 + consent-log row) inside the registration transaction, so demo accounts negotiate hands-free. Leave it unset in a real deployment; it is demo-box only, and only Settings can change the grant afterwards. |
+| `AI_MODEL` | `.env.example` ships one | Model name in the request body. |
+| `AI_MAX_TOKENS` / `AI_TIMEOUT_SECONDS` / `AI_TTL_DAYS` | `800` / `60` / `7` | Reply cap, per-turn wall clock, transcript retention. |
+| `MATCHING_DEFAULT_ON` | off | Demo-box only: signup seeds the `matching` + `publication·card` grants, because a chat turn can never grant anything. |
+| `DELEGATION_DEFAULT_ON` | off | Demo-box only: signup seeds the **delegation** grant so assistants negotiate hands-free. Only Settings can change it afterwards. |
+| `ENCODER_ENABLED` | `1` | Learned interest similarity; falls back to the hand-made taxonomy when it cannot load. |
 
-The protocol is OpenAI chat-completions **only**. A non-OpenAI shape (Anthropic `content_block_delta`, an empty
-completion, a non-SSE body) is a typed `ai_protocol` failure shown to you, never a silently empty reply. Switching
-`AI_API_URL` does not imply compatibility with whatever you point it at.
+The protocol is OpenAI chat-completions **only**. A non-OpenAI shape is a typed `ai_protocol` failure shown to the
+student, never a silently empty reply.
 
-### Interest similarity encoder (optional)
+### Interest similarity (optional)
 
-The matcher can score interests with a sentence encoder that runs **on this server** (not at a provider). Install with
-`uv sync --extra encoder` (pulls sentence-transformers and torch; it uses the GPU when torch sees one). On start the
-server loads the model in a background thread, downloading it into `./.cache` the first time and reusing it after;
-requests are never blocked on it. Without the extra, or with `ENCODER_ENABLED=0`, matching uses the hand-made taxonomy.
-Check the real model without starting the server: `uv run python -m server.encoder` (prints the AUC and sample scores).
+`uv sync --extra encoder` installs a sentence encoder that scores interests **on this server**, not at a provider.
+The extra pins the **CPU** torch build: the model is 33M parameters and the 34 tags are embedded once at startup, so
+a GPU saves milliseconds and costs ~2.5 GB of CUDA wheels. It loads in a background thread into `./.cache` (129 MB);
+first start downloads, later starts reuse it, and requests are never blocked on it.
 
-| Variable | Default | What it does |
+A quality gate decides whether it is used at all: below `ENCODER_MIN_AUC` (0.80) the encoder turns itself off and the
+taxonomy keeps scoring. Check it without starting the server:
+
+```bash
+uv run python -m server.encoder      # verified on our box: AUC 0.902, cpu, 520 probe pairs
+```
+
+## What crosses the wire — and what never does
+
+The product's claim is a schema, not a promise: `server/schema.py` is an allowlist with `extra="forbid"` at every
+level, and anything else is `422 payload_forbidden`.
+
+| Shared, after consent | Never leaves the student |
+| --- | --- |
+| UTC time ranges (+ a tz for display) | Calendar event titles, attendees, locations |
+| Interest tags in the student's own words | Course codes, professor names, grades |
+| `wants` (`hangout` / `event`) and `busy_load` 0–3 | Photos (except to a matched pair, before either confirms) |
+| A boolean consent block | The chat transcript |
+| A server-templated note: decision, tag, link, reason code | Anything an assistant decided on its own |
+
+**Interests, honestly:** the card shows the words the other student actually typed ("matcha"), while the matcher
+scores the canonical tag ("coffee") so two different words stay comparable. Your raw words are only ever served to
+the other member of the same match pair.
+
+**`.ics` upload:** read once, in memory (2 MiB cap, streamed), reduced to intervals — nothing is spooled to disk.
+Recurring events (`RRULE`/`RDATE`), `TZID`-qualified times and `PERIOD` values are **rejected with a reason**, never
+silently converted into free time. Malformed fixtures (missing `DTEND`, unterminated `VEVENT`, unbalanced components)
+are refused too: a broken calendar must never look like an empty one.
+
+## The five consent grants
+
+Everything the server may do with a student's data is one of five grants: versioned, recorded in `consent_log`,
+re-checked at the moment they are relied on (never cached), and revocable from Settings.
+
+| Grant | Covers |
+| --- | --- |
+| **matching** | Your windows and tags may generate candidates, and are re-checked at confirmation. Turning it off deletes your availability and voids open *and* confirmed plans — the UI warns and confirms. |
+| **publication · card** | A card and its notification, to matched users only. |
+| **publication · name** | Your display name on that card, to matched users only. |
+| **reveal** | Pair-scoped messaging once both sides agree — *designed, not in the demo* (the grant row exists, no channel does). |
+| **delegation** | "Let my assistant accept, counter or pass offers for me." Off by default, **only Settings can change it**, and the decision re-reads it inside the same transaction that would apply it. |
+
+## Judge hooks
+
+**Agent-to-agent, with a human veto.** The assistants negotiate the *activity*; the humans confirm the *plan*.
+
+| Constraint | What must happen | Proven by |
 | --- | --- | --- |
-| `ENCODER_ENABLED` | `1` | `0` skips the encoder entirely. |
-| `ENCODER_MODEL` | `BAAI/bge-small-en-v1.5` | Any sentence-transformers model name. |
-| `ENCODER_CACHE_DIR` | `./.cache` | Where weights are stored (git-ignored). |
-| `ENCODER_DEVICE` | `cpu` | The extra pins the CPU torch build (34 tags, embedded once): a GPU saves milliseconds and costs ~2.5 GB. `auto`/`cuda` remain valid if you install a CUDA build yourself. |
-| `ENCODER_MIN_AUC` | `0.80` | Quality gate: below this the encoder is not used. |
-| `ENCODER_MAP_MIN` | `0.85` | How close an unknown free-text word must be to one of our tags to be mapped to it. |
+| Overlap pick | One card, over the **longest** overlap (tie → earliest start). | `test_matching.py::test_longest_overlap_wins_tie_earliest_start` |
+| No overlap | Genuinely disjoint free time produces **no** card — "no time found" beats a bad suggestion. | `test_matching.py::test_sub_30_minute_overlap_produces_no_candidate` |
+| Budget conflict | One assistant's private budget rules out the other's pick, so it counters with another shared interest and a **reason code**. No amount ever leaves the device. | `test_activity.py::test_pass_with_reason_then_counter_then_accept`, demo beat 13 |
+| Round cap | After 3 offers the server stops; the students can still confirm the time. | `test_activity.py::test_round_cap_then_time_only_fallback` |
+| Two takers | Confirming two plans in one window is `409 slot_conflict`; concurrent confirm/revoke races end revoked, never double-booked. | `test_concurrency.py::test_overlapping_slot_conflict` |
+| Stale preview | An older preview cannot be confirmed: the confirm re-checks the state hash and applies nothing. | `test_chat.py` (optimistic-conflict path) |
+| Withdrawal mid-turn | A withdrawn delegation is re-read inside the write transaction, so an in-flight decision changes nothing. | `test_chat.py::test_autonomous_core_refuses_when_grant_vanishes_after_authorization` |
+| Provider reply cut off | Only a clean `[DONE]` completion may execute actions; a capped or truncated stream is text, never an instruction. | `test_ai_client.py`, `test_chat.py` |
+
+**Rigor, if you want a second signal:** the UI/UX layer went through a five-lane audit (38 findings) and three
+independent review gates that blocked on six defects the fixes themselves introduced — including a blank-form Save
+that could have emptied a student's availability. The record is in `UX-AUDIT.md` (now historical: everything is
+fixed). 544 tests and 17 demo beats are green.
 
 ## Repo layout
 
 | Path | What it is |
 | --- | --- |
-| `server/app.py` | FastAPI app: mounts the routers, starts the sweep loop and the negotiation worker. |
-| `server/schema.py` | **The allowlist for structured state.** `windows`, `tags`, `wants`, `free_time`, `consent` — and nothing else. Unknown keys at any level → 422 `payload_forbidden`. |
-| `server/statewrite.py` | The one validated state-write service. `mode="agent"` keeps today's grant-renew semantics for the legacy client; `mode="chat"` is **grant-preserving** — it never creates, renews, restores or withdraws a grant, and revalidates liveness and state version inside the write transaction. |
-| `server/state.py` | `POST /api/state`: the legacy client's write path, now a thin call into `statewrite`. |
-| `server/ai.py` | OpenAI chat-completions client: SSE parsing, typed errors, redaction, response byte cap. |
-| `server/chat.py` | Chat endpoints, action protocol, pending-preview store, per-user lock, rate rows. |
-| `server/schedules.py` | Manual windows + bounded `.ics` upload → preview → confirm. |
-| `server/negotiate.py` | Assistant-vs-assistant offer worker, gated on the delegation grant. |
-| `server/matching.py` | Candidate generation: overlap length, shared tags, `both_want_event`, score, reasons. |
-| `server/activity.py`, `server/offers.py` | **Assistant-to-assistant negotiation (Track 2).** `POST /api/agent/activity/propose` and `/respond`, `GET /api/agent/activity/{id}`: an offer is a shared tag plus an https link; the answer is accept, counter or pass with a reason code; 3 rounds at most. |
-| `server/scheduling.py` | Card, swipe (confirm/decline/block/report), counter, revoke, leave-matching, delete-account. |
-| `server/wording.py` | Message composition + the grant enforcement seam (`live_grant`, `name_visible`, `label`, pseudonyms). |
-| `server/inbox.py` | `GET /api/inbox` cursor; the inbox is a log, not a live view. |
-| `server/pairing.py` | Pairing codes, token rotation, `/pair/forget`. |
-| `server/sweep.py` | Expiry/purge sweep, including the 7-day chat transcript purge (read-time expiry is enforced in every query; the sweep only materialises it). |
-| `server/sessions.py`, `server/auth.py`, `server/passwords.py` | Session cookie, request identity, password hashing. |
-| `server/config.py` | Every tunable number, read at call time. |
-| `server/db.py` | SQLite connection helpers, `utcnow`, `immediate` transactions, `user_hash`. |
-| `server/webui/` | Templates + routes for register, login, chat, schedule, dashboard, card, matches, settings, privacy, terms, pair-approve. |
-| `schema.sql` | Authoritative schema (SQLite), including `chat_messages`, `chat_turns`, `chat_pending`. |
-| `tests/` | The suite (273 before the chat lanes): payload allowlist, matching, public-event signals, activity negotiation, concurrency, pairing, inbox/sweep, web UI, photos, review regressions, and the chat and schedule lanes. |
-| `docs/` | This repo's privacy policy and terms, which the server itself serves at `/privacy` and `/terms`. |
+| `server/schema.py` | **The allowlist for structured state** — windows, tags, wants, free_time, consent, and nothing else. |
+| `server/statewrite.py` | The one validated write service. `mode="agent"` keeps grant-renew semantics; `mode="chat"` is **grant-preserving** and revalidates liveness + state version inside the transaction. |
+| `server/chat.py` | Turn engine (SSE), action protocol, preview store, per-user lock, rate rows. |
+| `server/ai.py` | OpenAI chat-completions client: SSE parsing, typed errors, credential redaction, byte cap. |
+| `server/schedules.py` | Manual windows + bounded `.ics` → preview → confirm. |
+| `server/matching.py`, `server/taxonomy.py`, `server/encoder.py` | Candidate generation; hand-made taxonomy; optional learned similarity. |
+| `server/activity.py`, `server/offers.py`, `server/negotiate.py` | Assistant-to-assistant negotiation and the worker that drives it. |
+| `server/scheduling.py` | Card, swipe, counter, revoke, leave-matching, delete-account. |
+| `server/wording.py` | Message composition and the grant enforcement seam. |
+| `server/sweep.py` | Expiry/purge sweep (read-time expiry is enforced in every query; the sweep only materialises it). |
+| `server/webui/` | Templates + routes: chat, schedule, dashboard, card, matches, settings, register/login, privacy/terms. |
+| `schema.sql` | Authoritative schema (`chat_messages`, `chat_turns`, `chat_pending`, grants, candidates, proposals…). |
+| `tests/`, `demo/scenario.py` | 544 tests; 17 asserted beats over the real HTTP API. |
+| `docs/` | The privacy policy and terms the server itself serves at `/privacy` and `/terms`. |
 
-## The five consent grants
+## Honest caveats
 
-Everything the server is allowed to do with a student's data is one of five grants, all server-enforced, all versioned,
-all recorded in `consent_log`, all re-checked at the moment they are relied on (never cached), and all revocable from
-the settings page: **matching** (your windows and tags may be used to generate candidates, and again at
-confirmation — withdrawing it stops generation and voids in-flight plans); **publication · card** (a pseudonym, a preset
-avatar and your hobby tags may be shown to people you match with); **publication · name** (your display name goes on
-that card and into the notification text, to matched users only — never public, never searchable, and withdrawing it
-reverts *future* cards and texts to the pseudonym, because texts already sent cannot be recalled); **reveal** (a
-pair-scoped way to message someone, once both sides say yes — *designed, not in the demo*, the grant row exists and no
-channel does); and **delegation** (*"Let my assistant accept, counter or pass offers for me"* — off by default, **only
-Settings can change it**, the demo box seeds it via `DELEGATION_DEFAULT_ON=1`, and no chat operation can ever touch it).
-Publication grants expire 30 days after they are granted; every grant is a row with a version, so the
-version that was approved is the version that gets served.
+These are limits, stated plainly. `CONTRACT.md` §16 (the honesty ledger) is binding on this README and on `docs/`.
 
-## Judge hooks
-
-**Prototype + scenario script.** The prototype is the running app: sign in → talk to your assistant → define your
-schedule by hand or by `.ics` → the assistant applies state changes behind a preview and Confirm → assistants negotiate
-an offer when both sides delegate → humans swipe and confirm. `demo/scenario.py` runs seventeen asserted beats over the
-real HTTP API; the last three are the chat-era beats (manual windows, `.ics` preview + confirm, chat tag apply), and the
-activity negotiation is the standing agent beat.
-
-**Conflicting constraints** — the interesting beats, and where each is proven:
-
-| Beat | What must happen | Proven by |
-| --- | --- | --- |
-| Overlap pick | Two students with several shared free windows get exactly one card, over the **longest** overlap (tie → earliest start). | `tests/test_matching.py::test_longest_overlap_wins_tie_earliest_start` |
-| Counter | A second round of negotiation: the old proposal is voided, a new version is proposed, and the counterpart is told. | `tests/test_concurrency.py::test_counter_voids_old_and_bumps_version`, `::test_counter_outside_free_time_422` |
-| No-overlap refusal | Genuinely disjoint free time produces **no** card — the honest answer is "no time found", not a bad suggestion. | `tests/test_matching.py::test_sub_30_minute_overlap_produces_no_candidate` |
-| Budget conflict | One assistant's private budget rules out the other's pick, so it counters with another shared interest and a reason **code**; the first assistant accepts. No amount ever leaves the phone. | `tests/test_activity.py::test_pass_with_reason_then_counter_then_accept`, demo beat 13 |
-| Round cap | After 3 offers the server stops; the students are told no activity worked out and can still confirm the time. | `tests/test_activity.py::test_round_cap_then_time_only_fallback` |
-| Two takers | One student confirming two plans in the same window is a `409 slot_conflict`; concurrent confirm/revoke races end revoked, never double-booked. | `tests/test_concurrency.py::test_overlapping_slot_conflict`, `::test_race_confirm_vs_revoke_real_threads` |
-| Stale preview | A pending preview from an older state version cannot be confirmed: the confirm re-checks the state hash and refuses, applying nothing. | `tests/test_chat.py` (optimistic-conflict path) |
-
-**What your assistant shares vs. what never leaves.** Across the wire, and only after consent: UTC time ranges (+ a tz
-for display), interests in the student's own words (canonicalised server-side onto a 34-word vocabulary, so "matcha"
-scores as `coffee`; unmatched interests are kept but never scored or shown), `wants` (`hangout` / `event`), a boolean
-consent block, and — after the
-student's ack — a `student_confirmed_at` timestamp. Never in structured state: calendar titles, attendees, locations,
-course codes, professor names, grades, or free text. That is not a convention, it is `server/schema.py`:
-`extra="forbid"` at every level, closed tag list, and a 422 `payload_forbidden` for anything else (see
-`tests/test_payload.py::test_therapy_titles_never_accepted` and `::test_free_text_tag_rejected`).
-
-The chat box is the one deliberate free-text surface, and it is bounded: 4,000 characters per typed turn, a 200-message
-history window, 7-day retention, and 20 turns per 10 minutes. It goes to **your own assistant**, and only through the
-model provider named in the configuration; it is never another student's feed and it is never a bio. Assistant prose
-never enters your structured state, and only a server-templated note of a few fixed fields (decision, tag, link, reason
-code) crosses into the other student's transcript.
-
-**How the assistants negotiate.** Either assistant may offer an activity for a match; the other accepts, counters, or
-passes. An offer is
-`{candidate_id, proposal_version, activity_tag, activity_link}`: the tag must be an interest **both** students already
-have, and the link must be https (`server/offers.py` checks it). An answer is `accept`, `pass` + a reason code, or
-`counter` + a new
-tag and link. Nothing else is accepted (`extra="forbid"`, test `test_extra_fields_rejected_so_no_title_or_place_can_ride_along`).
-The searching is the student's own rules — a legacy phone client applies them on the device, and the chat
-assistant applies your stated intent; the server only holds the rounds. Until an offer is accepted
-the students cannot confirm (`409 activity_pending`). Negotiation turns are assistant-context only: a typed chat message
-can never emit an offer/accept/counter/pass op, and the apply transaction re-reads the delegation grant, account
-liveness and offer version, so withdrawing delegation mid-turn changes nothing.
-
-**When assistants ask, and when humans press.** In the legacy path the contract still requires the agent to show
-the student the exact windows, tags and name choice, and wait for "yes, send it". In the chat path the same gate is a
-pending preview: windows and events do not write until you press **Confirm**, which stamps `free_time.student_confirmed_at`
-(or `events_confirmed_at`) — the click is the provenance. Tags, wants and busy apply immediately when you ask for them.
-Confirm-your-side: a `right` swipe is a version-bound confirmation of one side only, and no message ever says the plan is
-on until a second side confirms — the confirmation text says "confirm your side", and
-`tests/test_inbox.py::test_confirmation_text_and_no_premature_youre_on` fails the build if "you're on" appears early.
-
-## HONEST CAVEATS
-
-These are limits of what we built, stated plainly. `CONTRACT.md` §16 makes keeping them exact a requirement.
-
-1. **The calendar-derived pipeline still awaits organizer confirmation.** The student→phone half of the legacy
-   path is not shipped in this repo, and that pipeline is demonstrated on synthetic fixtures: the demo posts
-   `agent_computed` payloads against fixed windows. The chat path sidesteps the question — you type the time or upload
-   your own export — but `student_confirmed_at` remains **provenance, not proof**: it records that the client asserted
-   "the student saw and approved this" (or that you clicked Confirm), and the server cannot verify that a human read
-   anything. It is validated as an ISO timestamp and stored; it is never treated as verification, and it must never be
-   described as one.
-2. **The invite gate is not identity verification.** `REGISTRATION_CODE` keeps signup closed to people we handed the
-   code to; it does not prove who anyone is. **18+ is self-attestation** — the register form records
-   `adult_attested_at` because the student ticked a box (`403 attest_required` if they do not), and nothing verifies it.
-   There is no ID check and no verification of school affiliation anywhere.
-3. **The assistants are models, and the demo does not make a live provider call.** The chat assistant is a language model
-   reached over the OpenAI chat-completions protocol; it can be wrong, including about your own state, which is why the
-   chips and the Settings page are the truth and every write is revalidated server-side. The autonomous negotiation
-   worker is bounded (one op per turn, 3 rounds, a 12-turns-per-10-minutes autonomy ceiling inside the shared 20/10 min
-   budget, two failed provider attempts per offer before it falls back to a manual Accept/Counter/Pass card) but it is
-   still a model deciding. In `demo/scenario.py` the provider is monkeypatched and beat 13's agents are scripted
-   stand-ins with a hard-coded budget rule, so the scenario proves the server-side loop, not a live model's judgement.
-   `tests/test_negotiate.py` and `tests/test_chat.py` pin the bounds; a production system would want more.
-4. **Links are the free-form strings.** The activity link and the public-event link are validated (https, ASCII, ≤300 chars, real domain, no
-   credentials, no fragment, no IP address) and never fetched by the server, but it is still a string a bad client could
-   choose. The Skill tells the agent to use only links it found in a public search.
-5. **Event links are validated, not vetted.** A student's agent finds public event pages and the student approves the
-   list, but the server only checks the link's shape and drops everything after `?`. It cannot tell a public page from a
-   page with a personal code in its path, and it never opens the link. Two students match on an event only when their
-   links are the same page after cleaning; a different URL for the same event will not match.
-6. **`busy_load` is a rough number, and now sometimes a typed one.** It comes from Canvas's last sync and the calendar in
-   the legacy path, or from what you tell your assistant in chat, 0 to 3; the server cannot check it. The rule-based
-   matcher ignores it, so it does nothing yet except wait for a ranking model.
-7. **The demo runset is invite-only and small.** It was run on team devices, with fictional students and synthetic
-   calendars. That is enough to show the loop closing; it is not a population, a load test, or a safety record.
-8. **The model provider is a processor we do not control.** A chat turn sends the system prompt (your own state), the
-   last 40 transcript messages and your text to the provider configured in `AI_API_URL`. That provider may log, retain
-   or train on what it receives, and we cannot promise otherwise, delete it on your behalf, or tell you where it is.
-   Do not type secrets. The privacy policy states this in the same terms; nothing here promises provider-side deletion
-   or anonymity.
-9. **The similarity encoder is borrowed, and checked only against our own judgments.** The model is a public pretrained
-   one we did not train. Its quality gate and calibration use our taxonomy and a short hand-written probe list, so a pass
-   means "agrees with us on those pairs", not that it understands every student's interests. It is untested on real
-   students, and until `python -m server.encoder` has been run on the deployed box we have not seen its real numbers. It
-   ranks and explains; it cannot override consent, blocks or the time overlap.
+1. **The phone-side client is not shipped.** A third-party agent can still talk to this broker — same allowlisted
+   payload, same pairing codes, same grants — but the calendar-reading client itself is out of scope for this repo.
+   The demo posts `agent_computed` payloads against fixed windows. `student_confirmed_at` is **provenance, not
+   proof**: it records that a client asserted "the student approved this" (or that you clicked Confirm), and the
+   server cannot verify a human read anything.
+2. **The invite gate is not identity verification**, and 18+ is self-attestation — the register form records
+   `adult_attested_at` because a box was ticked. No ID check, no school affiliation, anywhere.
+3. **The assistant is a model.** It can be wrong, including about your own state — which is why the chips and the
+   Settings page are the truth and every write is revalidated server-side. The negotiation worker is bounded (one op
+   per turn, 3 rounds, a 12-turns-per-10-min autonomy ceiling inside the shared 20/10 budget, two failed attempts
+   per offer before it hands the student a manual Accept/Counter/Pass card), but it is still a model deciding.
+4. **Links are validated, not vetted.** Activity and event links are checked for shape (https, ASCII, ≤300 chars, real
+   domain, no credentials, no fragment, no IP) and never fetched by the server. It cannot tell a public event page
+   from one with a personal code in its path. The chat assistant has **no web search**, so a link it invents is a
+   string it made up — the honest fix is a vetted link list, and that is not built.
+5. **`busy_load` is unverifiable.** It is what you tell the assistant, 0–3. The rule-based matcher ignores it; it waits
+   for a ranking model.
+6. **The similarity encoder is borrowed, and checked against our own judgments.** A pass means "agrees with us on our
+   probe pairs", not that it understands every student's interests. It ranks and explains; it cannot override
+   consent, blocks, or the time overlap.
+7. **The model provider is a processor we do not control.** A chat turn sends your own state, the last 40 transcript
+   messages and your text to whatever `AI_API_URL` names. It may log, retain or train on that. Don't type secrets.
+8. **The demo runset is small and invite-only**, run on team devices with fictional students and synthetic calendars.
+   It shows the loop closing; it is not a population study or a safety record.
+9. **Typed hard constraints are not built.** Budget and distance exist as an *agent's private rule* in the
+   negotiation story, not as a server-enforced filter. ML ranks; it never overrides.
 
 ## Documentation
 
-- `docs/privacy.md` — what we collect, what we reject, how long we keep it (also served at `/privacy`).
-- `docs/terms.md` — what this service is and is not (also served at `/terms`).
-- `CONTRACT.md` §16 — the honesty ledger these documents are held to.
-- `PLAN-chat-frontend.md` — the approved chat design; `CONTRACT-chat.md` — its names and seams.
+- `docs/privacy.md` — what we collect, what we reject, how long we keep it (served at `/privacy`).
+- `docs/terms.md` — what this service is and is not (served at `/terms`).
+- `CONTRACT.md` §16 — the honesty ledger the above are held to.
+- `UX-AUDIT.md` — the UI/UX findings, now historical (all fixed, gated three times).
+- `FLOW.md`, `PLAN.md`, `CONTRACT-chat.md` — design history; they describe the wire contract, not shipped client code.
+
+---
+
+Track 2 entry (agent-to-agent coordination). Built by Aradhya Dixit and Navraj Sikand.
