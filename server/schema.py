@@ -9,7 +9,7 @@ convention.
 Interests ("tags") are the one free-text field, and they are bounded: at most MAX_TAG_CHARS
 characters each and MAX_TAGS of them, with no control characters. The matcher canonicalises
 them into TAG_VOCAB (server/interests.py) so scoring stays comparable; unmatched interests are
-kept for the student and never shown to anyone else.
+kept for the student and never scored. A card shows the raw words, to the matched pair only.
 """
 import datetime
 from typing import Literal

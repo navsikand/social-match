@@ -13,8 +13,10 @@ Why it exists: a student should not be told "the matcher doesn't have a tag for 
 They say what they like; we translate. Unknown interests are not an error — they are
 simply not comparable, so they do not affect the score.
 
-Privacy note: canonical tags are what appear on a card. Raw interests stay attached to
-the student who typed them and are returned to them, but are never shown to anyone else.
+Privacy note (owner's call): a card shows the RAW words the other student typed, because
+that is what a person wants to read; canonical tags exist only so two different words stay
+comparable for scoring. Raw interests are bounded on write and are served only to the other
+member of the same match pair — never publicly, never to an outsider.
 """
 from server import encoder
 from server.schema import TAG_VOCAB
