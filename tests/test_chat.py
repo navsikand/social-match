@@ -191,6 +191,36 @@ def test_turn_busy_conflict(client):
 # ------------------------------------------------------------------ section: action protocol
 
 
+def test_stored_prose_never_contains_the_action_fence(client, monkeypatch):
+    """The fence is wire protocol, not conversation: stored assistant prose is prose only."""
+    uid = _register(client)
+    fenced = (
+        "Saved 3 windows for you.\n"
+        '```json\n{"actions": [{"op": "set_windows", "windows": [' +
+        '{"start": "2026-10-29T19:00:00", "end": "2026-10-29T21:00:00", "tz": "America/Los_Angeles"}]}]}\n```\n'
+    )
+    monkeypatch.setattr(chat.ai, "stream_reply", scripted(fenced))
+    r = client.post("/api/chat", json={"content": "free Thursday evening"})
+    assert r.status_code == 200
+
+    conn = db.connect()
+    try:
+        rows = db.q(
+            conn, "SELECT content FROM chat_messages WHERE user_id=? AND role='assistant'", (uid,)
+        )
+        assert rows, "the assistant reply must be stored"
+        for row in rows:
+            assert "```" not in row["content"], "the action fence must not be stored as prose"
+            assert "actions" not in row["content"], "protocol payload must not be stored as prose"
+    finally:
+        conn.close()
+
+    # And the live stream never EMITS tokens after the fence sentinel.
+    ev = [e for e in events_of(r) if e["type"] == "token"]
+    assert all("```" not in t["text"] for t in ev), "fence text must not stream as a token"
+    assert any("Saved" in t["text"] for t in ev), "prose before the fence still streams"
+
+
 def test_plain_conversation_persists_nothing_else(client, monkeypatch):
     uid = _register(client)
     monkeypatch.setattr(chat.ai, "stream_reply", scripted("Just chatting, no actions here."))

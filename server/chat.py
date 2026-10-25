@@ -335,7 +335,9 @@ def persist_final_assistant(conn, uid: int, text: str) -> bool | None:
     with _live_write(conn, uid) as alive:
         if not alive:
             return None
-        _persist_message(conn, uid, "assistant", text)
+        # The action fence is protocol MACHINERY, never conversation: store the prose only.
+        # (run_turn keeps parsing the full text from its own copy.)
+        _persist_message(conn, uid, "assistant", _strip_action_fence(text))
     return True
 
 
@@ -470,6 +472,7 @@ def build_system_prompt(conn, uid: int, turn: Turn) -> str:
         "CURRENT PROFILE",
         *_profile_lines(conn, uid),
         "",
+        "",
         "BOUNDED VOCABULARIES",
         f"- Interest tag examples (canonical names the matcher scores): {', '.join(TAG_VOCAB)}",
         "  Raw interests are allowed and are stored as the user typed them: 'matcha' is kept "
@@ -480,6 +483,15 @@ def build_system_prompt(conn, uid: int, turn: Turn) -> str:
         f"- Pass reasons: {', '.join(offers.REASONS)}",
         f"- State version (for your awareness only): {current_state_hash(conn, uid)}",
         "",
+        "TIME CONTEXT",
+        f"- Today's date (UTC clock): {datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M UTC')}",
+        f"- The user's last stored timezone: {_last_stored_tz(conn, uid)} — when the user asks for "
+        "something vague like 'free all week', 'weeknights' or 'this weekend', PROPOSE concrete "
+        "windows in that timezone as a set_windows batch (they will preview and Confirm; nothing "
+        "is saved until they do). Always spell out the dates and times you chose so the user can "
+        "correct you. Never refuse to concretise vague free time — proposing is your job; "
+        "confirming is theirs.",
+        "",
         _PROTOCOL_RULES,
     ]
     if turn.kind == "negotiation":
@@ -487,6 +499,47 @@ def build_system_prompt(conn, uid: int, turn: Turn) -> str:
         if turn.system_extra:
             lines.extend(["", "OFFER CONTEXT", turn.system_extra])
     return "\n".join(lines)
+
+
+def _last_stored_tz(conn, uid: int) -> str:
+    """The timezone of the user's most recent stored window, else 'unknown'.
+
+    This is display context for the assistant's proposals, not an input to any write: every
+    window still carries its own tz and the server validates it. 'unknown' means the assistant
+    must ASK which timezone before proposing times (never guess).
+    """
+    row = db.one(
+        conn,
+        "SELECT tz FROM availability_windows WHERE user_id=? ORDER BY id DESC LIMIT 1",
+        (uid,),
+    )
+    if row is None:
+        row = db.one(
+            conn,
+            "SELECT tz FROM user_events WHERE user_id=? ORDER BY id DESC LIMIT 1",
+            (uid,),
+        )
+    if row is None:
+        return "unknown — ASK the user for their timezone before proposing any time"
+    return row["tz"]
+
+
+def _strip_action_fence(text: str) -> str:
+    """Remove the trailing json action fence from text shown/stored as conversation prose.
+
+    The fence is a wire protocol, not a message: the preview card carries the actual content.
+    Both storage and the live SSE note path go through persist_final_assistant, so history and
+    the stream agree. Prose with no fence is untouched.
+    """
+    fences = _fences(text)
+    json_fences = [f for f in fences if f.lang == "json"]
+    if len(fences) == 1 and len(json_fences) == 1 and not text[json_fences[0].end :].strip():
+        stripped = text[: json_fences[0].start].rstrip()
+        # A cut-off UNCLOSED fence (capped/EOF replies) still shouldn't render: mark it.
+        if not json_fences[0].end and text.rstrip().endswith("`"):
+            stripped += "\n…"
+        return stripped
+    return text
 
 
 # --------------------------------------------------------------------- action parsing
@@ -870,6 +923,7 @@ async def run_turn(conn, uid: int, turn: Turn) -> AsyncIterator[dict]:
     chunks: list[str] = []
     provider_error: ai.AIError | None = None
     status = ai.EOF
+    fence_started = False  # ``` began: everything after is protocol, not prose
     stream = ai.stream_reply(system, messages)
     try:
         # F5: read the completion STATUS (`ai.Completion`, the stream's last item) rather than
@@ -880,7 +934,17 @@ async def run_turn(conn, uid: int, turn: Turn) -> AsyncIterator[dict]:
                 status = piece.status if piece.status in (ai.DONE, ai.CAPPED) else ai.EOF
                 continue
             chunks.append(piece)
-            yield {"type": "token", "text": piece}
+            # Protocol machinery never renders as conversation: once a ``` fence begins,
+            # everything after it is the action protocol, so stop EMITTING tokens (the
+            # stream keeps draining so the F5 Completion sentinel still arrives).
+            if not fence_started:
+                if "```" in piece:
+                    fence_started = True
+                    head = piece.split("```", 1)[0]
+                    if head:
+                        yield {"type": "token", "text": head}
+                else:
+                    yield {"type": "token", "text": piece}
     except ai.AIError as exc:
         provider_error = exc
     except Exception as exc:  # a broken provider seam never takes the stream down
