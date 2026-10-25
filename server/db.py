@@ -39,11 +39,34 @@ def connect(path: str | None = None) -> sqlite3.Connection:
     return conn
 
 
+# Column additions applied to databases that already exist (the deployed one does).
+# Literal statements, no interpolation: the names are constants, not input.
+_PHOTO_MIGRATIONS = (
+    ("photo_path", "ALTER TABLE users ADD COLUMN photo_path TEXT"),
+    ("photo_revision", "ALTER TABLE users ADD COLUMN photo_revision INTEGER NOT NULL DEFAULT 0"),
+    ("photo_published_at", "ALTER TABLE users ADD COLUMN photo_published_at TEXT"),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Idempotent, serialized column additions.
+
+    Two processes can start at once, so the PRAGMA read and the ALTER run under a single
+    BEGIN IMMEDIATE: one wins the write lock, the other sees the column already there.
+    """
+    with immediate(conn):
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        for name, statement in _PHOTO_MIGRATIONS:
+            if name not in existing:
+                conn.execute(statement)
+
+
 def init_db(path: str | None = None) -> None:
     conn = connect(path)
     try:
         with open(SCHEMA_PATH) as f:
             conn.executescript(f.read())
+        _migrate(conn)
     finally:
         conn.close()
 

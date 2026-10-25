@@ -8,7 +8,10 @@ CREATE TABLE IF NOT EXISTS users (
   preset_avatar_id INTEGER NOT NULL DEFAULT 1,
   adult_attested_at TEXT,
   created_at TEXT NOT NULL,
-  deleted_at TEXT
+  deleted_at TEXT,
+  photo_path TEXT,                      -- '{uid}-{rev}.jpg' under UPLOAD_DIR; NULL = no photo
+  photo_revision INTEGER NOT NULL DEFAULT 0,
+  photo_published_at TEXT               -- NULL = withdrawn / never published
 );
 
 CREATE TABLE IF NOT EXISTS pairing_codes (

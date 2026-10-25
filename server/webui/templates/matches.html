@@ -19,19 +19,26 @@
   function matchEl(item) {
     const el = document.createElement("article");
     el.className = "card candidate";
+
     const h = document.createElement("h3");
-    h.textContent = item.display_name || item.pseudonym || ("Match " + (item.candidate_id || ""));
+    h.textContent = item.about || ("Match " + (item.candidate_id || ""));
     el.appendChild(h);
+
     const when = document.createElement("p");
     when.className = "muted";
-    when.textContent = (item.window && (item.window.display || item.window)) ||
-      item.display || "Window confirmed";
+    when.textContent =
+      (item.window && (item.window.display_with_date || item.window.display)) || "Window confirmed";
     el.appendChild(when);
-    const href = item.card_url || (item.candidate_id ? "/m/" + item.candidate_id : null);
-    if (href) {
+
+    const badge = document.createElement("p");
+    badge.className = "muted";
+    badge.textContent = item.historical ? "Past plan" : (item.state === "closed" ? "Closed" : "Upcoming");
+    el.appendChild(badge);
+
+    if (item.card_url) {
       const a = document.createElement("a");
       a.className = "button";
-      a.href = href;
+      a.href = item.card_url;
       a.textContent = "Open card";
       el.appendChild(a);
     }
@@ -41,26 +48,24 @@
   (async function () {
     try {
       const res = await fetch("/api/matches", {headers: {"Accept": "application/json"}});
-      if (res.status === 404) {
-        show(status, "The match list service isn't connected yet. Check back soon.", "info");
-        return;
-      }
       if (res.status === 401) {
         window.location.href = "/login?next=/matches";
         return;
       }
       if (!res.ok) {
-        show(status, "The match list isn't available right now.", "info");
+        let data = null;
+        try { data = await res.json(); } catch (err) { data = null; }
+        show(status, "Couldn't load your matches. " + apiError(res, data), "error");
         return;
       }
       const data = await res.json();
-      const items = (data && (data.matches || data.candidates)) || [];
+      const items = (data && data.matches) || [];
       list.innerHTML = "";
       for (const item of items) list.appendChild(matchEl(item));
-      if (items.length === 0) show(status, "No confirmed matches yet.", "info");
+      if (items.length === 0) show(status, "No confirmed plans yet.", "info");
       else status.hidden = true;
     } catch (err) {
-      show(status, "The match list service isn't connected yet. Check back soon.", "info");
+      show(status, "Couldn't load your matches. Check your connection and try again.", "error");
     }
   })();
 </script>

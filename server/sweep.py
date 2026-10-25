@@ -5,6 +5,54 @@ import contextlib
 from server import config, db
 
 
+PHOTO_GRACE_SECONDS = 3600
+
+
+def purge_orphan_photos(conn) -> int:
+    """Delete photo files that are BOTH unreferenced AND older than the grace window.
+
+    Both conditions, never either alone: a file older than an hour may still be a quiet
+    user's live photo, and an unreferenced file may belong to a publication still in flight.
+    Runs inside the sweep's write transaction, which is the same lock publication takes, so a
+    file cannot be judged orphaned while an upload is publishing it.
+
+    Returns the number of files removed. Failure to read the directory is not an error.
+    """
+    import os
+    import time
+
+    from server import config
+
+    directory = config.upload_dir()
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return 0
+    referenced = {
+        row["photo_path"]
+        for row in conn.execute(
+            "SELECT photo_path FROM users WHERE photo_path IS NOT NULL"
+        ).fetchall()
+    }
+    removed = 0
+    for name in names:
+        if name in referenced:
+            continue
+        path = os.path.join(directory, name)
+        try:
+            age = time.time() - os.path.getmtime(path)
+        except OSError:
+            continue
+        if age <= PHOTO_GRACE_SECONDS:
+            continue
+        try:
+            os.unlink(path)
+        except OSError:
+            continue
+        removed += 1
+    return removed
+
+
 def run_sweep(conn=None) -> dict:
     own = conn is None
     if own:
@@ -66,6 +114,7 @@ def run_sweep(conn=None) -> dict:
                 (now,),
             )
             counts["consent_purged"] = cur.rowcount
+            counts["photos_purged"] = purge_orphan_photos(conn)
         return counts
     finally:
         if own:

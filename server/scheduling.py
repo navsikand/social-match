@@ -11,7 +11,9 @@ confirm transaction is fixed by CONTRACT §8 and any deviation is called out inl
 """
 from __future__ import annotations
 
+import contextlib
 import datetime
+import os
 import json
 from zoneinfo import ZoneInfo
 
@@ -19,7 +21,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from server import config, db, sessions, wording
+from server import config, db, photo_api, sessions, wording
 
 router = APIRouter(prefix="/api", tags=["scheduling"])
 
@@ -175,6 +177,96 @@ def dashboard(conn, uid: int) -> dict:
     }
 
 
+# ------------------------------------------------------------------ matches
+
+_MATCHED_STATES = ("matched", "closed")
+_CONFIRMED_PROPOSAL_STATES = ("both_confirmed", "closed")
+
+
+def _window_date(start_utc: str, tz: str) -> str:
+    """'25 Oct' — the start day as seen in the window's own tz (history needs the date)."""
+    try:
+        zone = ZoneInfo(tz)
+    except Exception:
+        zone = datetime.UTC
+    try:
+        dt = datetime.datetime.strptime(start_utc[:19], "%Y-%m-%dT%H:%M:%S")
+    except (TypeError, ValueError):
+        return ""
+    local = dt.replace(tzinfo=datetime.UTC).astimezone(zone)
+    return f"{local.day} {local.strftime('%b')}"
+
+
+def matches(conn, uid: int) -> dict:
+    """Confirmed plans the viewer may still see (CONTRACT-photos.md §3).
+
+    Authorization is checked *before* wording.label: label picks name vs pseudonym, it never
+    decides whether the person is rendered at all.
+    """
+    now = db.utcnow()
+    rows = db.q(
+        conn,
+        # Read-time retention, same rule as every other read: closed history older than
+        # CLOSED_MATCH_DAYS is invisible even if the sweep has not run.
+        "SELECT * FROM candidates WHERE (user_a=? OR user_b=?) AND state IN (?,?)"
+        " AND COALESCE(closed_at, created_at) > ?",
+        (uid, uid, *_MATCHED_STATES, db.utcnow(days=-config.closed_match_days())),
+    )
+    upcoming: list[tuple[str, dict]] = []
+    historical: list[tuple[str, dict]] = []
+    for cand in rows:
+        about_uid = counterpart(cand, uid)
+        if not wording.matching_live(conn, cand["user_a"], cand["user_b"]):
+            continue
+        if wording.live_grant(conn, about_uid, "publication", "card") is None:
+            continue
+        if (
+            availability_live(conn, uid, now) is None
+            or availability_live(conn, about_uid, now) is None
+        ):
+            continue
+        if wording.blocked_pair(conn, cand["user_a"], cand["user_b"]):
+            continue
+        prop = current_proposal(conn, cand["id"])
+        if prop is None or prop["state"] not in _CONFIRMED_PROPOSAL_STATES:
+            continue
+
+        tz = display_tz(conn, cand)
+        start, end = prop["window_start"], prop["window_end"]
+        is_historical = end < now
+        display = wording.fmt_window(start, end, tz)
+        conf = db.one(
+            conn,
+            "SELECT MAX(confirmed_at) AS at FROM proposal_confirmations WHERE proposal_id=?",
+            (prop["id"],),
+        )
+        item = {
+            "candidate_id": cand["id"],
+            "about": wording.label(conn, about_uid),
+            "window": {
+                "start_utc": start,
+                "end_utc": end,
+                "tz": tz,
+                "display": display,
+                "display_with_date": f"{display} · {_window_date(start, tz)}",
+            },
+            "state": cand["state"],
+            "historical": is_historical,
+            "confirmed_at": conf["at"] if conf else None,
+            # A closed candidate has no card() (it rejects closed), so the link would be a
+            # dead end even when the window itself has not passed.
+            "card_url": None
+            if (is_historical or cand["state"] == "closed")
+            else wording.card_url(cand["id"]),
+        }
+        (historical if is_historical else upcoming).append((end, item))
+
+    # Upcoming soonest first; history most recent first.
+    upcoming.sort(key=lambda pair: pair[0])
+    historical.sort(key=lambda pair: pair[0], reverse=True)
+    return {"matches": [item for _, item in upcoming] + [item for _, item in historical]}
+
+
 # ------------------------------------------------------------------ card
 
 
@@ -211,6 +303,9 @@ def card(conn, uid: int, candidate_id: int) -> dict:
             "display_name": about["display_name"] if wording.name_visible(conn, about_uid) else None,
             "preset_avatar_id": about["preset_avatar_id"],
             "hobby_tags": tags,
+            # PLAN §B5 / gate review P1: the URL lives inside `about`, which is what
+            # card.html reads. Emitted top-level, the card silently kept the avatar.
+            "photo_url": photo_api.card_photo_url(conn, uid, about_uid),
         },
         "window": {
             "start_utc": prop["window_start"],
@@ -546,16 +641,25 @@ def leave_matching(conn, uid: int) -> dict:
 
 
 def delete_account(conn, uid: int) -> dict:
-    """One txn. Strip identifiers, drop derived rows, keep blocks + reports + hashed consent."""
+    """One txn. Strip identifiers, drop derived rows, keep blocks + reports + hashed consent.
+
+    Photo bytes are unlinked AFTER the transaction commits: SQLite cannot roll back a
+    filesystem operation, and the DB is what authorizes serving, so revoking first and
+    unlinking second is the only order where a crash leaves an unreachable file rather than
+    a servable one. The sweeper covers a crash between the two (gate review P1).
+    """
+    stored_photo = None
     with db.immediate(conn):
+        stored_photo = db.one(conn, "SELECT photo_path FROM users WHERE id=?", (uid,))
+        stored_photo = stored_photo["photo_path"] if stored_photo else None
         now = db.utcnow()
         purge_after = db.utcnow(days=config.audit_residue_days())
         rows = db.q(conn, "SELECT id FROM candidates WHERE user_a=? OR user_b=?", (uid, uid))
         conn.execute(
             # Reviewer P1 #1: a non-identifying UNIQUE tombstone, so the SECOND account
             # deletion doesn't collide on users.email='' and roll back its own erasure.
-            "UPDATE users SET email=?, display_name='deleted user', password_hash='', deleted_at=?"
-            " WHERE id=?",
+            "UPDATE users SET email=?, display_name='deleted user', password_hash='', deleted_at=?,"
+            " photo_path=NULL, photo_published_at=NULL WHERE id=?",
             (f"deleted-{uid}@invalid", now, uid),
         )
         conn.execute("DELETE FROM availability WHERE user_id=?", (uid,))
@@ -585,7 +689,13 @@ def delete_account(conn, uid: int) -> dict:
             "UPDATE consent_log SET detail_json='{}', purge_after=? WHERE user_id_hash=?",
             (purge_after, db.user_hash(uid)),
         )
-        return {"ok": True}
+
+    # Committed: this account can no longer authorize serving a photo. Reclaim the bytes now;
+    # if the unlink fails, the DB already says "no photo" and sweep.purge_orphan_photos retries.
+    if stored_photo:
+        with contextlib.suppress(OSError):
+            os.unlink(os.path.join(config.upload_dir(), os.path.basename(stored_photo)))
+    return {"ok": True}
 
 
 # ------------------------------------------------------------------ endpoints
@@ -623,6 +733,11 @@ def _handle(fn, *args) -> JSONResponse:
 @router.get("/dashboard")
 def api_dashboard(user=Depends(sessions.require_session), conn=Depends(db.get_conn)):
     return _handle(dashboard, conn, user["id"])
+
+
+@router.get("/matches")
+def api_matches(user=Depends(sessions.require_session), conn=Depends(db.get_conn)):
+    return _handle(matches, conn, user["id"])
 
 
 @router.get("/card/{candidate_id}")

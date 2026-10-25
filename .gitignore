@@ -10,3 +10,4 @@ skill_data/
 socialmatch.conf
 *.log
 *.sqlite3
+uploads/

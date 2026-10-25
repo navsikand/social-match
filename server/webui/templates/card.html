@@ -13,6 +13,11 @@
     <span id="state" class="pill"></span>
   </header>
 
+  <figure id="photo-wrap" class="card-photo-wrap" hidden>
+    <img id="card-photo" class="card-photo" alt="Their photo">
+  </figure>
+  <p id="photo-note" class="muted small card-photo-note">Shown only to people who receive this card.</p>
+
   <p class="window"><strong id="window-display"></strong></p>
   <p id="window-utc" class="muted small"></p>
 
@@ -83,6 +88,32 @@
     for (const b of cardEl.querySelectorAll("button")) b.disabled = value;
   }
 
+  // Photo path: show the photo when the card carries one, fall back to the preset
+  // avatar glyph if it fails to load, and keep the glyph when there is no photo.
+  function renderPhoto(photoUrl) {
+    const avatarEl = document.getElementById("avatar");
+    const photoWrap = document.getElementById("photo-wrap");
+    const photoImg = document.getElementById("card-photo");
+
+    if (!photoUrl) {
+      photoImg.removeAttribute("src");
+      photoImg.hidden = true;
+      photoWrap.hidden = true;
+      avatarEl.hidden = false;
+      return;
+    }
+    photoImg.onerror = function () {
+      photoImg.hidden = true;
+      photoWrap.hidden = true;
+      avatarEl.hidden = false;
+    };
+    photoImg.alt = "Their photo";
+    photoImg.src = photoUrl;
+    photoImg.hidden = false;
+    photoWrap.hidden = false;
+    avatarEl.hidden = true;
+  }
+
   function render(data) {
     card = data;
     const about = data.about || {};
@@ -92,6 +123,7 @@
       about.display_name && about.pseudonym ? "aka " + about.pseudonym : "";
     const avatarIdx = (parseInt(about.preset_avatar_id, 10) || 1) - 1;
     document.getElementById("avatar").textContent = AVATARS[avatarIdx] || AVATARS[0];
+    renderPhoto(about.photo_url || null);
     document.getElementById("state").textContent = data.state || "proposed";
 
     const w = data.window || {};

@@ -62,3 +62,12 @@ def audit_residue_days() -> int:
 
 def blocks_retention_months() -> int:
     return _int_env("BLOCKS_RETENTION_MONTHS", 12)
+
+
+def upload_dir() -> str:
+    """Where published photos live. Created on demand; verified writable at startup."""
+    explicit = os.environ.get("UPLOAD_DIR")
+    if explicit:
+        return explicit
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(root, "uploads")

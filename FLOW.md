@@ -101,7 +101,7 @@ phone on their next check-in. Say that out loud rather than implying realtime.
 
 ---
 
-## 2. Consent: four grants
+## 2. Consent: four grants, and one photo publication
 
 Server-enforced, recorded in `consent_log`, revocable, and re-checked at the moment each one is relied on.
 
@@ -125,12 +125,25 @@ Server-enforced, recorded in `consent_log`, revocable, and re-checked at the mom
 }
 ```
 
+**Publishing a photo is a fifth consent act, and deliberately not a fifth row.** The upload control on the student's
+own settings page *is* the consent, and it is bound to one revision of one image rather than to a `grants` tier:
+
+- absent photo = off; nothing is published implicitly;
+- a replacement image is a **new** publication decision, because it is a different picture about to be shown to people
+  they have not met — `photo_revision` increments and the old filename stops being addressable;
+- it is **never implied by `card` or `card+name`**, and it never displaces them (the publication upsert withdraws the
+  previous publication row, so photo permission is stored on `users`, not in `grants`);
+- it is **web-only**: only the website can show the preview and the audience sentence that make the consent informed, so
+  `POST /api/state` **neither grants nor withdraws** it, and a state resend **preserves** whatever is currently
+  published;
+- removal clears `photo_published_at` first and unlinks the file after, so access dies even if the unlink fails.
+
 **The name is a publication choice, not a prize for confirming.** A student who grants `card+name` gets "Ava's up for
 Thursday" in the text and "Ava" on the card, before anyone confirms anything — which is where a name is actually useful.
 A student who grants only `card` is `climber-7f2a` in both places.
 
-**The authorization rule, precisely.** A card, or a message about student X, is served to student Y only when all of
-these hold at the moment of use — never cached:
+**The authorization rule, precisely.** A card, a message about student X, or X's photo is served to student Y only when
+all of these hold at the moment of use — never cached:
 
 | Requirement | Whose grants | When |
 | --- | --- | --- |
@@ -139,6 +152,10 @@ these hold at the moment of use — never cached:
 | publication · name live | **X** | **Only when the card or the text contains X's name** |
 | not blocked, either direction | — | Always |
 | availability not expired | X and Y | Always |
+| photo published (`photo_published_at` non-null, file present) | **X** | **Only when serving X's photo.** Applies to the owner's own preview too |
+
+A photo fetch that fails any of these — including the owner's own preview after they remove it — is **`404`**, never
+`403`, so the route cannot be used to probe who has a photo or a card.
 
 So the pseudonymous path needs two grants and the named path needs three. A missing name grant never blocks a card — it
 demotes it to the pseudonym. If X edits their card, `version` increments and the old grant stops qualifying: that is a
@@ -272,7 +289,8 @@ a redaction pass before the request is built.
 | Concern | Position |
 | --- | --- |
 | Who can be discovered | **Invite-only, consenting adults**, on the team's own devices. Not open signup |
-| Identity | **Preset avatars only. No photo upload, no free-text bio.** Nothing to impersonate, nothing to leak |
+| Identity | **A preset avatar, or one published photo, and no free-text bio.** The photo is optional, re-encoded from pixels with all metadata stripped before storage, and deletable in one press |
+| Photos | One per account, JPEG/PNG, ≤5 MB upload, long edge 1600 px after resize. Shown only to signed-in holders of the live card, **before either side confirms**; `no-store`; **404 for every refusal**, owner's own preview included. No automated moderation: a report hides the pair at once and a named team member responds |
 | Chat | **None in the demo.** Reveal (a pair-scoped thread) is deferred: the demo ends at a confirmed time, and talking happens off-platform |
 | Reporting | One report → auto-hide both directions immediately, plus a named moderator on the team with takedown |
 | Blocking | Bilateral, checked before candidate generation, so a blocked person cannot reappear |
@@ -334,7 +352,9 @@ working delete button.
 ## 10. Data model
 
 ```sql
-users        (id, email, display_name, preset_avatar_id, adult_attested_at, created_at, deleted_at)
+users        (id, email, display_name, preset_avatar_id, adult_attested_at, created_at, deleted_at,
+              photo_path, photo_revision, photo_published_at)
+             -- photo_path: '{uid}-{revision}.jpg|png' under UPLOAD_DIR; photo_published_at NULL = withdrawn
 pairings     (id, user_id, agent_id, token_hash, label, created_at, last_seen_at, revoked_at)
 
 grants       (id, user_id, kind, tier, version, fields_json, audience,
@@ -370,7 +390,7 @@ blocks       (user_id_hash, blocked_user_hash, created_at, expires_at)
 | --- | --- |
 | Public discovery, open signup | Invite-only proves the mechanism; a public launch needs policy work we haven't done |
 | Events and any booking path | Out of the demo — see §8 |
-| Photo upload and object storage | Preset avatars: nothing to leak, nothing to moderate |
+| Automated moderation of photos | Nothing scans an image before it is served. A report hides the pair at once and a named team member responds; a real classifier needs training data and an appeals path we don't have |
 | Repeat-account prevention | Needs identity verification, which needs a product decision |
 | Automated audit and backup machinery | A **policy commitment**, not a claim of implementation |
 | Multi-agent conflict beyond revoke | One pairing per demo user; `written_by_agent_id` exists so revoke is meaningful |
@@ -392,7 +412,8 @@ blocks       (user_id_hash, blocked_user_hash, created_at, expires_at)
 | 1:10 | Ava opens the link, sees the card, swipes right |
 | 1:25 | Ben's phone, next check-in: "Ava confirmed — open the link to confirm your side" (not "you're on") |
 | 1:40 | Ben confirms: both see the same time. Then Ava revokes — her web session updates at once, Ben's phone says so on his next check-in |
-| 1:55 | The card: *"What our server accepted: 2 time ranges, 2 tags, one confirmation, and a name she chose to publish. What it rejects with a 422: classes, grades, calendar titles, photos."* |
+| 1:48 | Ava's settings: *Publish this photo on my card*. Ben's open card shows the photo; the response is `no-store`. She presses remove — the same URL is a 404 and the preset avatar is back |
+| 1:55 | The card: *"What our server accepted: 2 time ranges, 2 tags, one confirmation, and a name she chose to publish, plus a photo she published from her own settings page. What it rejects with a 422: classes, grades, calendar titles, and any photo an agent tries to send."* |
 
 Both demo students grant `card+name`, which is the point of the shot: a name before confirmation. Granting only `card`
 would produce the same demo with `climber-7f2a` in place of every name — worth filming as the second take if there's

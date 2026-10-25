@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from server import db, sweep
-from server import inbox, pairing, scheduling, state
+from server import inbox, pairing, photo_api, scheduling, state
 from server.webui import router as webui
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webui", "static")
@@ -31,8 +31,20 @@ app.include_router(pairing.router)
 app.include_router(state.router)
 app.include_router(scheduling.router)
 app.include_router(inbox.router)
+app.include_router(photo_api.router)
 app.include_router(webui.router)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.middleware("http")
+async def _sensitive_no_store(request: Request, call_next):
+    """Gate review P2: photos, matches and every JSON error are per-viewer and revocable, so
+    mark the whole API surface (and served images) non-cacheable, including refusals."""
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/api/") or path.startswith("/media/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 @app.exception_handler(HTTPException)
 async def _flat_http_exception(request: Request, exc: HTTPException):

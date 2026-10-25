@@ -6,6 +6,18 @@
   <p class="muted">Grants are time-boxed and can be withdrawn at any time. New versions supersede old ones.</p>
 </section>
 
+<section class="panel photo-panel">
+  <h2>Publish this photo on my card</h2>
+  <p class="muted">Your photo is shown to signed-in people who receive your live candidate card, before either person confirms. Not to the public, not to anyone you haven't been matched with. You can remove it any time.</p>
+  <p><input id="photo-file" type="file" accept="image/jpeg,image/png"></p>
+  <img id="photo-preview" class="photo-preview" alt="Your photo preview" hidden>
+  <p class="photo-actions">
+    <button id="photo-publish" class="primary" type="button" disabled>Publish</button>
+    <button id="photo-remove" class="secondary" type="button">Remove</button>
+  </p>
+  <p id="photo-status" class="notice" hidden></p>
+</section>
+
 <section class="panel">
   <h2>Matching</h2>
   <label class="check">
@@ -87,6 +99,174 @@
       show(delStatus, apiError(out.res, out.data), "error");
     } catch (err) {
       show(delStatus, "Network error — is the server running?", "error");
+    }
+  });
+
+  // ---- your photo (independent of the grants form above; never posts grants) ----
+  const photoFile = document.getElementById("photo-file");
+  const photoPreview = document.getElementById("photo-preview");
+  const photoPublish = document.getElementById("photo-publish");
+  const photoRemove = document.getElementById("photo-remove");
+  const photoStatus = document.getElementById("photo-status");
+
+  const PHOTO_MAX_PX = 1600;
+  const PHOTO_QUALITY = 0.85;
+  let photoBlob = null;
+  let previewObjectUrl = null;
+
+  function photoMessage(res, data) {
+    if (res.status === 413) {
+      return "That photo is too large. Pick one under 5 MB (JPEG or PNG).";
+    }
+    if (res.status === 415) {
+      return "That file isn't a JPEG or PNG we can read. Try another picture.";
+    }
+    if (res.status === 429) {
+      return "Too many uploads just now — wait ten minutes and try again.";
+    }
+    if (res.status === 401) {
+      return "Your session expired — sign in again.";
+    }
+    return apiError(res, data);
+  }
+
+  function clearPreview() {
+    if (previewObjectUrl) {
+      URL.revokeObjectURL(previewObjectUrl);
+      previewObjectUrl = null;
+    }
+    photoPreview.hidden = true;
+    photoPreview.removeAttribute("src");
+  }
+
+  function showPreview(src, isObjectUrl) {
+    if (previewObjectUrl) {
+      URL.revokeObjectURL(previewObjectUrl);
+      previewObjectUrl = null;
+    }
+    if (!src) {
+      clearPreview();
+      return;
+    }
+    if (isObjectUrl) previewObjectUrl = src;
+    photoPreview.src = src;
+    photoPreview.hidden = false;
+  }
+
+  // Draw the file into a canvas capped at 1600 px on the long edge, then re-encode
+  // as JPEG at quality 0.85 so the body we POST is already the stored shape.
+  function shrinkToJpeg(file) {
+    return new Promise(function (resolve, reject) {
+      const objectUrl = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = function () {
+        try {
+          const longEdge = Math.max(img.naturalWidth, img.naturalHeight) || 0;
+          if (!longEdge) {
+            URL.revokeObjectURL(objectUrl);
+            reject(new Error("empty image"));
+            return;
+          }
+          const scale = longEdge > PHOTO_MAX_PX ? PHOTO_MAX_PX / longEdge : 1;
+          const width = Math.max(1, Math.round(img.naturalWidth * scale));
+          const height = Math.max(1, Math.round(img.naturalHeight * scale));
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, width, height);
+          URL.revokeObjectURL(objectUrl);
+          canvas.toBlob(function (blob) {
+            if (blob) resolve(blob);
+            else reject(new Error("encode failed"));
+          }, "image/jpeg", PHOTO_QUALITY);
+        } catch (err) {
+          URL.revokeObjectURL(objectUrl);
+          reject(err);
+        }
+      };
+      img.onerror = function () {
+        URL.revokeObjectURL(objectUrl);
+        reject(new Error("decode failed"));
+      };
+      img.src = objectUrl;
+    });
+  }
+
+  photoFile.addEventListener("change", async function () {
+    const file = photoFile.files && photoFile.files[0];
+    photoBlob = null;
+    photoPublish.disabled = true;
+    if (!file) {
+      clearPreview();
+      photoStatus.hidden = true;
+      return;
+    }
+    if (file.type !== "image/jpeg" && file.type !== "image/png") {
+      clearPreview();
+      show(photoStatus, "Choose a JPEG or PNG picture.", "error");
+      return;
+    }
+    show(photoStatus, "Preparing preview…", "info");
+    try {
+      const blob = await shrinkToJpeg(file);
+      photoBlob = blob;
+      showPreview(URL.createObjectURL(blob), true);
+      photoPublish.disabled = false;
+      show(photoStatus, "Ready to publish (" + Math.round(blob.size / 1024) + " KB).", "info");
+    } catch (err) {
+      clearPreview();
+      show(photoStatus, "That file couldn't be read as an image. Try another picture.", "error");
+    }
+  });
+
+  photoPublish.addEventListener("click", async function () {
+    if (!photoBlob) {
+      show(photoStatus, "Choose a picture first.", "error");
+      return;
+    }
+    photoPublish.disabled = true;
+    show(photoStatus, "Publishing…", "info");
+    try {
+      const res = await fetch("/api/me/photo", {
+        method: "POST",
+        headers: {"Content-Type": "image/jpeg"},
+        body: photoBlob,
+      });
+      let data = null;
+      try { data = await res.json(); } catch (err) { data = null; }
+      if (res.ok) {
+        const url = (data && data.photo_url) || null;
+        if (url) showPreview(url, false);
+        show(photoStatus, "Published. Your card shows this photo to people who receive it.", "ok");
+        photoPublish.disabled = false;
+      } else {
+        show(photoStatus, photoMessage(res, data), "error");
+        photoPublish.disabled = false;
+      }
+    } catch (err) {
+      show(photoStatus, "Network error — is the server running?", "error");
+      photoPublish.disabled = false;
+    }
+  });
+
+  photoRemove.addEventListener("click", async function () {
+    show(photoStatus, "Removing…", "info");
+    try {
+      const res = await fetch("/api/me/photo", {method: "DELETE"});
+      let data = null;
+      try { data = await res.json(); } catch (err) { data = null; }
+      if (res.ok) {
+        photoBlob = null;
+        photoFile.value = "";
+        clearPreview();
+        photoPublish.disabled = true;
+        show(photoStatus, "Removed. Your card shows your avatar again.", "ok");
+      } else {
+        show(photoStatus, photoMessage(res, data), "error");
+      }
+    } catch (err) {
+      show(photoStatus, "Network error — is the server running?", "error");
     }
   });
 </script>
