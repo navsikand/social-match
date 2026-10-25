@@ -1,0 +1,523 @@
+#!/usr/bin/env python3
+"""Read the inbox and publish availability state for the Social Match server (CONTRACT.md S5, S9).
+
+Python standard library only: urllib.request, json, argparse, os, sys.
+
+    python3 scripts/bus.py --poll [--since N]   # print new inbox messages, then "NEXT SINCE <seq>"
+    python3 scripts/bus.py --send-state FILE    # POST /api/state, print the server's JSON reply
+    python3 scripts/bus.py --revoke [ID]        # web-session-only: prints what to do, exits 2
+    python3 scripts/bus.py --whoami             # print this agent's stored identity (exit 0 when paired)
+    python3 scripts/bus.py --selftest           # offline argument/payload checks
+
+Server: env SOCIAL_MATCH_SERVER, default http://localhost:8000.
+Auth file: <--data-dir>/auth.json (default ./skill_data), written by pair.py.
+Exit codes: 0 ok, 1 server/state error (the server's {"error","detail"} body is printed when present),
+2 usage error or a local payload/file problem that must be fixed before sending.
+"""
+
+import argparse
+import contextlib
+import io
+import json
+import os
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+
+DEFAULT_SERVER = "http://localhost:8000"
+# WAFs reject the stock Python-urllib signature (Cloudflare: error 1010).
+USER_AGENT = "study-match-skill/0.1"
+DEFAULT_DATA_DIR = "./skill_data"
+TIMEOUT_SECONDS = 20
+
+# CONTRACT S5: the closed vocabulary. A tag outside this list is rejected by the server.
+TAG_VOCAB = [
+    "bouldering", "climbing", "hiking", "running", "gym", "swimming", "cycling", "basketball", "soccer",
+    "tennis", "ultimate_frisbee", "board_games", "video_games", "chess", "painting", "drawing", "photography",
+    "pottery", "guitar", "piano", "singing", "live_music", "edm", "techno", "rock", "jazz", "coffee", "baking",
+    "cooking", "language_exchange", "debate", "anime", "cinema", "volunteering",
+]
+WANTS_VOCAB = ["hangout", "event"]
+PAYLOAD_KEYS = {"windows", "tags", "wants", "free_time", "consent"}
+WINDOW_KEYS = {"start", "end", "tz"}
+FREE_TIME_KEYS = {"source", "student_confirmed_at"}
+CONSENT_KEYS = {"matching", "publication"}
+PUBLICATION_KEYS = {"tier"}
+MAX_WINDOWS = 20
+MAX_TAGS = 5
+
+
+# ---------------------------------------------------------------- config
+
+
+# Set from --server in main(); outranks the env var. None means "no override".
+_SERVER_OVERRIDE = None
+
+
+def server_url():
+    """Base URL: --server, else SOCIAL_MATCH_SERVER, else http://localhost:8000.
+
+    The flag exists because a hosted deployment cannot rely on an exported env var
+    surviving between separate sandbox commands; Cubbie can pass --server every time.
+    """
+    if _SERVER_OVERRIDE:
+        return _SERVER_OVERRIDE.strip().rstrip("/")
+    return (os.environ.get("SOCIAL_MATCH_SERVER") or DEFAULT_SERVER).strip().rstrip("/")
+
+
+def auth_path(data_dir):
+    return os.path.join(data_dir, "auth.json")
+
+
+# ---------------------------------------------------------------- auth.json
+
+
+def read_auth(data_dir):
+    """The pairing pair.py stored, or None when the student has not paired yet."""
+    path = auth_path(data_dir)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        print(f"cannot read {path}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(data, dict) or not data.get("token") or not data.get("agent_id"):
+        print(f"{path} is incomplete; run `python3 scripts/pair.py --start` again", file=sys.stderr)
+        sys.exit(1)
+    return data
+
+
+def require_auth(data_dir):
+    auth = read_auth(data_dir)
+    if auth is None:
+        print("not paired yet: run `python3 scripts/pair.py --start`", file=sys.stderr)
+        sys.exit(1)
+    return auth
+
+
+# ---------------------------------------------------------------- HTTP
+
+
+def error_lines(body_text, status):
+    """Human lines for a failed response. Handles raw {"error","detail"} and FastAPI's {"detail": {...}}."""
+    node = None
+    try:
+        parsed = json.loads(body_text)
+    except (TypeError, ValueError):
+        parsed = None
+    if isinstance(parsed, dict):
+        node = parsed["detail"] if isinstance(parsed.get("detail"), dict) else parsed
+    if isinstance(node, dict) and ("error" in node or "detail" in node):
+        lines = []
+        if node.get("error"):
+            lines.append(f"error: {node['error']}")
+        detail = node.get("detail")
+        if detail:
+            lines.append(f"detail: {detail if isinstance(detail, str) else json.dumps(detail)}")
+        if lines:
+            return lines
+    text = (body_text or "").strip()
+    return [f"HTTP {status}" + (f": {text[:300]}" if text else "")]
+
+
+def api(method, path, payload=None, token=None):
+    """Call the server, return the parsed JSON body. On an HTTP error print the body and exit 1."""
+    url = server_url() + path
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=data, method=method)  # noqa: S310 - SOCIAL_MATCH_SERVER
+    # Cloudflare (and most WAFs) block the default "Python-urllib/x.y" signature
+    # outright — error 1010. Identify the Skill honestly instead.
+    request.add_header("User-Agent", USER_AGENT)
+    request.add_header("Accept", "application/json")
+    if data is not None:
+        request.add_header("Content-Type", "application/json")
+    if token:
+        request.add_header("Authorization", "Bearer " + token)
+    try:
+        # http(s) only: the base URL comes from SOCIAL_MATCH_SERVER.
+        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:  # noqa: S310
+            raw = response.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", "replace")
+        for line in error_lines(raw, exc.code):
+            print(line, file=sys.stderr)
+        sys.exit(1)
+    except (urllib.error.URLError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        print(f"cannot reach {server_url()}: {reason}", file=sys.stderr)
+        sys.exit(1)
+    if not raw.strip():
+        return {}
+    try:
+        return json.loads(raw)
+    except ValueError:
+        print(f"server sent something that is not JSON: {raw[:300]}", file=sys.stderr)
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------- payload checks
+
+
+def payload_problems(payload):
+    """Local pre-flight for CONTRACT S5. The server is still the authority (422 payload_forbidden).
+
+    Only checks what the server is known to reject, so it can never block a payload the server accepts.
+    Every extra key is a problem: extra="forbid" means a stray key fails the whole request, and a stray
+    key is exactly how an event title would leak into a request body.
+    """
+    problems = []
+    if not isinstance(payload, dict):
+        return ["the payload must be a JSON object"]
+
+    extra = sorted(set(payload) - PAYLOAD_KEYS)
+    if extra:
+        problems.append(f"unknown top-level key(s): {', '.join(extra)}; only {sorted(PAYLOAD_KEYS)} are allowed")
+    missing = sorted(PAYLOAD_KEYS - set(payload))
+    if missing:
+        problems.append(f"missing key(s): {', '.join(missing)}")
+
+    windows = payload.get("windows", [])
+    if not isinstance(windows, list):
+        problems.append("windows must be a list")
+        windows = []
+    elif len(windows) > MAX_WINDOWS:
+        problems.append(f"windows has {len(windows)} entries; at most {MAX_WINDOWS} are allowed")
+    for index, window in enumerate(windows):
+        if not isinstance(window, dict):
+            problems.append(f"windows[{index}] must be an object")
+            continue
+        stray = sorted(set(window) - WINDOW_KEYS)
+        if stray:
+            problems.append(f"windows[{index}] has unknown key(s): {', '.join(stray)}")
+        for key in sorted(WINDOW_KEYS - set(window)):
+            problems.append(f"windows[{index}] is missing {key}")
+        start, end = window.get("start"), window.get("end")
+        if isinstance(start, str) and isinstance(end, str) and not start < end:
+            problems.append(f"windows[{index}] start must be before end (local 'YYYY-MM-DDTHH:MM' strings)")
+
+    tags = payload.get("tags", [])
+    if not isinstance(tags, list):
+        problems.append("tags must be a list")
+    else:
+        unknown = sorted({tag for tag in tags if tag not in TAG_VOCAB})
+        if unknown:
+            problems.append(f"tags not in TAG_VOCAB: {', '.join(map(str, unknown))}")
+        if len(set(tags)) > MAX_TAGS:
+            problems.append(f"at most {MAX_TAGS} tags are allowed")
+
+    wants = payload.get("wants", [])
+    if not isinstance(wants, list):
+        problems.append("wants must be a list")
+    else:
+        unknown = sorted({want for want in wants if want not in WANTS_VOCAB})
+        if unknown:
+            problems.append(f"wants must be from {WANTS_VOCAB}, got: {', '.join(map(str, unknown))}")
+
+    free_time = payload.get("free_time")
+    if not isinstance(free_time, dict):
+        problems.append("free_time must be an object")
+    else:
+        stray = sorted(set(free_time) - FREE_TIME_KEYS)
+        if stray:
+            problems.append(f"free_time has unknown key(s): {', '.join(stray)}")
+        source = free_time.get("source")
+        if source not in ("student", "cubbie_computed"):
+            problems.append("free_time.source must be 'student' or 'cubbie_computed'")
+        if source == "cubbie_computed" and not free_time.get("student_confirmed_at"):
+            problems.append("free_time.source 'cubbie_computed' needs student_confirmed_at (when the student said yes)")
+
+    consent = payload.get("consent")
+    if not isinstance(consent, dict):
+        problems.append("consent must be an object")
+    else:
+        stray = sorted(set(consent) - CONSENT_KEYS)
+        if stray:
+            problems.append(f"consent has unknown key(s): {', '.join(stray)}")
+        if not isinstance(consent.get("matching"), bool):
+            problems.append("consent.matching must be true or false")
+        publication = consent.get("publication")
+        if not isinstance(publication, dict):
+            problems.append("consent.publication must be an object")
+        else:
+            stray = sorted(set(publication) - PUBLICATION_KEYS)
+            if stray:
+                problems.append(f"consent.publication has unknown key(s): {', '.join(stray)}")
+            if publication.get("tier") not in ("card", "card+name"):
+                problems.append("consent.publication.tier must be 'card' or 'card+name'")
+    return problems
+
+
+def load_payload(path):
+    """Read and pre-flight a payload file. Local problems are usage errors: print and exit 2."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        print(f"no such file: {path}", file=sys.stderr)
+        sys.exit(2)
+    except OSError as exc:
+        print(f"cannot read {path}: {exc}", file=sys.stderr)
+        sys.exit(2)
+    except ValueError as exc:
+        print(f"{path} is not valid JSON: {exc}", file=sys.stderr)
+        sys.exit(2)
+    problems = payload_problems(payload)
+    if problems:
+        print(f"{path} is not a valid CONTRACT S5 payload:", file=sys.stderr)
+        for problem in problems:
+            print(f"- {problem}", file=sys.stderr)
+        sys.exit(2)
+    return payload
+
+
+# ---------------------------------------------------------------- commands
+
+
+def poll_lines(items):
+    """One line per item: payload.message, then card_url when present. Blank messages are skipped."""
+    lines = []
+    for item in items:
+        payload = item.get("payload") or {}
+        message = payload.get("message")
+        if message:
+            lines.append(str(message))
+        card_url = payload.get("card_url")
+        if card_url:
+            lines.append(str(card_url))
+    return lines
+
+
+def cmd_poll(args):
+    auth = require_auth(args.data_dir)
+    data = api("GET", f"/api/inbox?since={args.since}", token=auth["token"])
+    items = data.get("items") or []
+    for line in poll_lines(items):
+        print(line)
+    seqs = [item.get("seq") for item in items if isinstance(item.get("seq"), int)]
+    print(f"NEXT SINCE {max(seqs) if seqs else args.since}")
+    return 0
+
+
+def cmd_send_state(args):
+    auth = require_auth(args.data_dir)
+    payload = load_payload(args.send_state)
+    data = api("POST", "/api/state", payload, token=auth["token"])
+    print(json.dumps(data, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_revoke(args):
+    """Revoking needs the student's web session (CONTRACT S4/S11). There is no bearer path, on purpose."""
+    link = f"{server_url()}/m/{args.revoke}" if args.revoke else f"{server_url()}/"
+    print("Revoking a plan has to happen on the website, not from here.")
+    print("It needs the student's own web session, so this Skill can't do it for them.")
+    print("Send the student this link and ask them to tap Revoke there:")
+    print(link)
+    return 2
+
+
+def cmd_whoami(args):
+    auth = read_auth(args.data_dir)
+    if auth is None:
+        print("not paired: run `python3 scripts/pair.py --start`", file=sys.stderr)
+        return 1
+    print(f"agent_id: {auth.get('agent_id')}")
+    print(f"server: {auth.get('server') or '(unknown)'}")
+    print(f"paired_at: {auth.get('paired_at') or '(unknown)'}")
+    print(f"auth: {auth_path(args.data_dir)}")
+    if auth.get("server") and auth["server"] != server_url():
+        print(f"note: SOCIAL_MATCH_SERVER is {server_url()} but auth.json was paired with {auth['server']}")
+    return 0
+
+
+# ---------------------------------------------------------------- selftest
+
+
+def quiet(call):
+    """Run call with its output discarded; return what it returns, or the SystemExit code it raises."""
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        try:
+            return call()
+        except SystemExit as exc:
+            return exc.code
+
+
+def check(condition, label, failures):
+    if condition:
+        print(f"ok: {label}")
+    else:
+        print(f"FAIL: {label}")
+        failures.append(label)
+
+
+def good_payload():
+    return {
+        "windows": [
+            {"start": "2026-10-29T19:00", "end": "2026-10-29T21:00", "tz": "America/Los_Angeles"},
+            {"start": "2026-11-01T10:00", "end": "2026-11-01T12:00", "tz": "America/Los_Angeles"},
+        ],
+        "tags": ["climbing", "coffee"],
+        "wants": ["hangout"],
+        "free_time": {"source": "cubbie_computed", "student_confirmed_at": "2026-10-24T09:10:00Z"},
+        "consent": {"matching": True, "publication": {"tier": "card"}},
+    }
+
+
+def selftest(args):
+    """Argument, payload and rendering checks only. No network, no writes outside a temp dir."""
+    failures = []
+
+    previous_server = os.environ.get("SOCIAL_MATCH_SERVER")
+    try:
+        os.environ.pop("SOCIAL_MATCH_SERVER", None)
+        check(server_url() == DEFAULT_SERVER, f"default server is {DEFAULT_SERVER}", failures)
+        os.environ["SOCIAL_MATCH_SERVER"] = "http://example.test:9000/"
+        check(server_url() == "http://example.test:9000", "SOCIAL_MATCH_SERVER is honored, trailing slash dropped", failures)
+        globals()["_SERVER_OVERRIDE"] = "https://devhacks.navraj.me/"
+        check(server_url() == "https://devhacks.navraj.me", "--server overrides env and drops trailing slash", failures)
+        globals()["_SERVER_OVERRIDE"] = None
+        os.environ["SOCIAL_MATCH_SERVER"] = ""
+        check(server_url() == DEFAULT_SERVER, "empty SOCIAL_MATCH_SERVER falls back to the default", failures)
+    finally:
+        if previous_server is None:
+            os.environ.pop("SOCIAL_MATCH_SERVER", None)
+        else:
+            os.environ["SOCIAL_MATCH_SERVER"] = previous_server
+
+    check(len(TAG_VOCAB) == 34 and len(set(TAG_VOCAB)) == 34, "TAG_VOCAB has the 34 unique CONTRACT S5 tags", failures)
+    check(auth_path("./skill_data") == os.path.join("./skill_data", "auth.json"), "auth.json lives in --data-dir", failures)
+
+    problems = payload_problems(good_payload())
+    check(problems == [], f"the bundled example shape validates ({problems})", failures)
+
+    leaking = good_payload()
+    leaking["calendar_titles"] = ["Therapy — Dr. Ruiz"]
+    check(any("calendar_titles" in problem for problem in payload_problems(leaking)),
+          "an extra key (a title) is caught before sending", failures)
+
+    leaking_window = good_payload()
+    leaking_window["windows"][0]["title"] = "Therapy — Dr. Ruiz"
+    check(any("title" in problem for problem in payload_problems(leaking_window)),
+          "a title inside a window is caught before sending", failures)
+
+    unconfirmed = good_payload()
+    del unconfirmed["free_time"]["student_confirmed_at"]
+    check(any("student_confirmed_at" in problem for problem in payload_problems(unconfirmed)),
+          "cubbie_computed without student_confirmed_at is caught", failures)
+
+    bad_tags = good_payload()
+    bad_tags["tags"] = ["therapy"]
+    check(any("TAG_VOCAB" in problem for problem in payload_problems(bad_tags)), "a free-text tag is caught", failures)
+
+    bad_want = good_payload()
+    bad_want["wants"] = ["party"]
+    check(any("wants" in problem for problem in payload_problems(bad_want)), "a want outside the vocabulary is caught", failures)
+
+    bad_order = good_payload()
+    bad_order["windows"][0]["end"] = bad_order["windows"][0]["start"]
+    check(any("start must be before end" in problem for problem in payload_problems(bad_order)),
+          "a zero-length window is caught", failures)
+
+    many = good_payload()
+    many["windows"] = [{"start": "2026-10-29T19:00", "end": "2026-10-29T20:00", "tz": "UTC"}] * 21
+    check(any("at most 20" in problem for problem in payload_problems(many)), "21 windows are caught", failures)
+
+    items = [
+        {"seq": 4, "kind": "candidate", "payload": {"message": "Ava is up for Thu 19:00-21:00.", "card_url": "http://x/m/1"}},
+        {"seq": 7, "kind": "match", "payload": {"message": "It's on: Thu 19:00-21:00 with Ava."}},
+    ]
+    check(poll_lines(items) == [
+        "Ava is up for Thu 19:00-21:00.",
+        "http://x/m/1",
+        "It's on: Thu 19:00-21:00 with Ava.",
+    ], "poll prints the message then card_url, one per line", failures)
+    seqs = [item["seq"] for item in items]
+    check(max(seqs) == 7, "NEXT SINCE takes the highest seq", failures)
+    check(poll_lines([]) == [], "an empty inbox prints no item lines", failures)
+
+    fastapi_body = json.dumps({"detail": {"error": "payload_forbidden", "detail": "unknown key 'calendar_titles'"}})
+    check(error_lines(fastapi_body, 422) == ["error: payload_forbidden", "detail: unknown key 'calendar_titles'"],
+          "FastAPI {'detail': {...}} errors are unwrapped", failures)
+    plain_body = json.dumps({"error": "token_revoked", "detail": "this agent was unlinked"})
+    check(error_lines(plain_body, 401) == ["error: token_revoked", "detail: this agent was unlinked"],
+          "bare {'error','detail'} bodies are printed", failures)
+    check(error_lines("oops", 500) == ["HTTP 500: oops"], "non-JSON errors still print", failures)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        check(read_auth(tmp) is None, "no auth.json yet reads as not paired", failures)
+        bad_file = os.path.join(tmp, "bad.json")
+        with open(bad_file, "w", encoding="utf-8") as handle:
+            handle.write('{"windows": [}')
+        check(quiet(lambda: load_payload(bad_file)) == 2, "an unreadable payload file exits 2", failures)
+        good_file = os.path.join(tmp, "payload.json")
+        with open(good_file, "w", encoding="utf-8") as handle:
+            json.dump(good_payload(), handle)
+        check(load_payload(good_file)["tags"] == ["climbing", "coffee"], "a valid payload file loads", failures)
+
+    parser = build_parser()
+    for argv, label in (([], "no command"), (["--poll", "--whoami"], "two commands at once"),
+                        (["--poll", "--since", "abc"], "a non-numeric --since")):
+        check(quiet(lambda argv=argv: parser.parse_args(argv)) == 2, f"{label} is a usage error (exit 2)", failures)
+
+    parsed = parser.parse_args(["--poll", "--since", "12"])
+    check(parsed.poll is True and parsed.since == 12, "--poll --since N parses", failures)
+    parsed = parser.parse_args(["--send-state", "payload.example.json"])
+    check(parsed.send_state == "payload.example.json", "--send-state FILE parses", failures)
+    parsed = parser.parse_args(["--revoke", "5"])
+    check(parsed.revoke == "5", "--revoke [ID] parses", failures)
+
+    check(quiet(lambda: cmd_revoke(parser.parse_args(["--revoke", "5"]))) == 2,
+          "--revoke tells the student to use the web and exits 2", failures)
+
+    if failures:
+        print(f"\n{len(failures)} check(s) failed", file=sys.stderr)
+        return 1
+    print("\nselftest passed (no network calls were made)")
+    return 0
+
+
+# ---------------------------------------------------------------- CLI
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="bus.py",
+        description="Read the match inbox and publish the student's free windows and tags.",
+    )
+    parser.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="where auth.json lives (default: ./skill_data)")
+    parser.add_argument("--server", default=None,
+                        help="base URL of the match server; overrides SOCIAL_MATCH_SERVER")
+    actions = parser.add_mutually_exclusive_group(required=True)
+    actions.add_argument("--poll", action="store_true", help="print new inbox messages, then NEXT SINCE <seq>")
+    actions.add_argument("--send-state", metavar="FILE", help="POST a CONTRACT S5 payload file to /api/state")
+    actions.add_argument("--revoke", metavar="ID", nargs="?", const="", default=None,
+                         help="web-session-only: prints what the student should do and exits 2")
+    actions.add_argument("--whoami", action="store_true", help="print the stored identity (exit 0 when paired)")
+    actions.add_argument("--selftest", action="store_true", help="run offline checks and exit 0/1")
+    parser.add_argument("--since", type=int, default=0, help="with --poll: last seq already seen (default 0)")
+    return parser
+
+
+def main(argv=None):
+    global _SERVER_OVERRIDE
+    args = build_parser().parse_args(argv)
+    if getattr(args, "server", None):
+        _SERVER_OVERRIDE = args.server
+    if args.selftest:
+        return selftest(args)
+    if args.poll:
+        return cmd_poll(args)
+    if args.send_state:
+        return cmd_send_state(args)
+    if args.revoke is not None:
+        return cmd_revoke(args)
+    if args.whoami:
+        return cmd_whoami(args)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

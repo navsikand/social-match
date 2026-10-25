@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Settings — Social Match{% endblock %}
+{% block content %}
+<section class="hero">
+  <h1>Sharing settings</h1>
+  <p class="muted">Grants are time-boxed and can be withdrawn at any time. New versions supersede old ones.</p>
+</section>
+
+<section class="panel">
+  <h2>Matching</h2>
+  <label class="check">
+    <input type="checkbox" id="matching" {% if grants.matching %}checked{% endif %}>
+    Let Cubbie look for compatible people and create cards.
+  </label>
+</section>
+
+<section class="panel">
+  <h2>Publication</h2>
+  <p class="muted">What a card may show about you when it reaches a matched person.</p>
+  <label>Publication tier
+    <select id="publication" data-current="{{ grants.publication.tier if grants.publication else 'off' }}">
+      <option value="off">Off — withdraw my publication grant</option>
+      <option value="card">Card — pseudonym only</option>
+      <option value="card+name">Card + name — show my display name</option>
+    </select>
+  </label>
+  <p><button id="save" class="primary" type="button">Save sharing settings</button></p>
+  <p id="settings-status" class="notice" hidden></p>
+</section>
+
+<section class="panel danger">
+  <h2>Delete my account</h2>
+  <p class="muted">Deletes your windows, tags, pairings, cards and live grants. Stripped audit rows and
+    pseudonymous block hashes are kept for safety, then purged on their retention schedule.</p>
+  <button id="delete-account" class="danger" type="button">Delete my account</button>
+  <p id="delete-status" class="notice" hidden></p>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+  const status = document.getElementById("settings-status");
+  const publication = document.getElementById("publication");
+  publication.value = publication.dataset.current || "off";
+  const delStatus = document.getElementById("delete-status");
+
+  document.getElementById("save").addEventListener("click", async function () {
+    show(status, "Saving…", "info");
+    const payload = {
+      matching: document.getElementById("matching").checked,
+      publication: {tier: document.getElementById("publication").value},
+    };
+    try {
+      const out = await postJSON("/api/settings/grants", payload);
+      if (out.res.ok) {
+        const g = (out.data && out.data.grants) || {};
+        show(status, "Saved. Matching is " + (g.matching ? "on" : "off") +
+          "; publication is " + (g.publication ? g.publication.tier : "off") + ".", "ok");
+      } else {
+        show(status, apiError(out.res, out.data), "error");
+      }
+    } catch (err) {
+      show(status, "Network error — is the server running?", "error");
+    }
+  });
+
+  document.getElementById("delete-account").addEventListener("click", async function () {
+    const ok = window.confirm(
+      "Delete your account? Your cards, availability and live grants are removed. " +
+      "This cannot be undone."
+    );
+    if (!ok) return;
+    show(delStatus, "Deleting…", "info");
+    try {
+      const out = await postJSON("/api/delete-account", {confirm: true});
+      if (out.res.ok) {
+        window.location.href = "/login";
+        return;
+      }
+      if (out.res.status === 404) {
+        show(delStatus, "Account deletion isn't wired up yet. Nothing was changed.", "info");
+        return;
+      }
+      if (out.res.status === 401) {
+        window.location.href = "/login?next=/settings";
+        return;
+      }
+      show(delStatus, apiError(out.res, out.data), "error");
+    } catch (err) {
+      show(delStatus, "Network error — is the server running?", "error");
+    }
+  });
+</script>
+{% endblock %}

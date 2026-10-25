@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Register — Social Match{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Create your account</h1>
+  <p class="muted">Your card is only shown to people you are matched with, under the sharing rules you choose.</p>
+
+  <form id="register-form" class="stack" novalidate>
+    <label>Email
+      <input type="email" name="email" id="email" autocomplete="email" required>
+    </label>
+    <label>Display name
+      <input type="text" name="display_name" id="display_name" maxlength="60" required>
+    </label>
+    <label>Password
+      <input type="password" name="password" id="password" autocomplete="new-password" minlength="8" required>
+    </label>
+    <label>Avatar
+      <select name="avatar_id" id="avatar_id">
+        {% for i in range(1, 9) %}<option value="{{ i }}">Avatar {{ i }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Registration code
+      <input type="text" name="registration_code" id="registration_code" autocomplete="off" required>
+    </label>
+    <label class="check">
+      <input type="checkbox" name="adult_attested" id="adult_attested">
+      I am 18 or older. This is a self-attestation, not age verification.
+    </label>
+    <button class="primary" type="submit">Create account</button>
+    <p id="register-status" class="notice" hidden></p>
+  </form>
+  <p class="muted">Already registered? <a href="/login">Sign in</a>.</p>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+  const form = document.getElementById("register-form");
+  const status = document.getElementById("register-status");
+  form.addEventListener("submit", async function (ev) {
+    ev.preventDefault();
+    show(status, "Creating account…", "info");
+    const payload = {
+      email: document.getElementById("email").value,
+      display_name: document.getElementById("display_name").value,
+      password: document.getElementById("password").value,
+      avatar_id: parseInt(document.getElementById("avatar_id").value, 10),
+      registration_code: document.getElementById("registration_code").value,
+      adult_attested: document.getElementById("adult_attested").checked,
+    };
+    try {
+      const out = await postJSON("/api/register", payload);
+      if (out.res.ok) {
+        window.location.href = "/";
+        return;
+      }
+      const text = apiError(out.res, out.data);
+      if ((out.data && out.data.detail && out.data.detail.error) === "invite_required") {
+        show(status, "That registration code is not valid.", "error");
+      } else if ((out.data && out.data.detail && out.data.detail.error) === "attest_required") {
+        show(status, "You must confirm you are 18 or older.", "error");
+      } else {
+        show(status, text, "error");
+      }
+    } catch (err) {
+      show(status, "Network error — is the server running?", "error");
+    }
+  });
+</script>
+{% endblock %}

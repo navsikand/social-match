@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Social Match{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">Cubbie Match</a>
+    <nav>
+      {% if signed_in %}
+        <a href="/">Dashboard</a>
+        <a href="/matches">Matches</a>
+        <a href="/settings">Settings</a>
+        <button id="logout-btn" class="linklike" type="button">Sign out</button>
+      {% else %}
+        <a href="/login">Sign in</a>
+        <a href="/register">Register</a>
+      {% endif %}
+    </nav>
+  </header>
+
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="foot">
+    <a href="/privacy">Privacy</a>
+    <a href="/terms">Terms</a>
+    <a href="/skill">Cubbie skill</a>
+  </footer>
+
+  <script>
+    async function postJSON(url, body) {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(body || {}),
+      });
+      let data = null;
+      try { data = await res.json(); } catch (err) { data = null; }
+      return {res: res, data: data};
+    }
+
+    function apiError(res, data) {
+      const d = data && data.detail;
+      if (d && typeof d === "object" && d.error) {
+        return d.error + (d.detail ? " — " + d.detail : "");
+      }
+      if (typeof d === "string" && d) return d;
+      if (data && data.error) return data.error + (data.detail ? " — " + data.detail : "");
+      return "Request failed (" + res.status + ").";
+    }
+
+    function show(el, text, kind) {
+      if (!el) return;
+      el.textContent = text;
+      el.className = "notice " + (kind || "");
+      el.hidden = false;
+    }
+
+    (function () {
+      const btn = document.getElementById("logout-btn");
+      if (!btn) return;
+      btn.addEventListener("click", async function () {
+        try { await fetch("/api/logout", {method: "POST"}); } catch (err) { /* clear anyway */ }
+        window.location.href = "/login";
+      });
+    })();
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

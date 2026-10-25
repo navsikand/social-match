@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Sign in — Social Match{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Sign in</h1>
+  <form id="login-form" class="stack" novalidate>
+    <label>Email
+      <input type="email" name="email" id="email" autocomplete="email" required>
+    </label>
+    <label>Password
+      <input type="password" name="password" id="password" autocomplete="current-password" required>
+    </label>
+    <button class="primary" type="submit">Sign in</button>
+    <p id="login-status" class="notice" hidden></p>
+  </form>
+  <p class="muted">New here? <a href="/register">Create an account</a>.</p>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+  const form = document.getElementById("login-form");
+  const status = document.getElementById("login-status");
+  const next = {{ (next or '')|tojson }};
+  form.addEventListener("submit", async function (ev) {
+    ev.preventDefault();
+    show(status, "Signing in…", "info");
+    try {
+      const out = await postJSON("/api/login", {
+        email: document.getElementById("email").value,
+        password: document.getElementById("password").value,
+      });
+      if (out.res.ok) {
+        window.location.href = next && next.charAt(0) === "/" ? next : "/";
+        return;
+      }
+      show(status, out.res.status === 401 ? "Email or password is incorrect." : apiError(out.res, out.data), "error");
+    } catch (err) {
+      show(status, "Network error — is the server running?", "error");
+    }
+  });
+</script>
+{% endblock %}

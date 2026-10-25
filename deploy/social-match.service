@@ -1,0 +1,36 @@
+[Unit]
+Description=Social Match — Cubbie Track 2 (FastAPI + SQLite)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=nav
+Group=nav
+WorkingDirectory=/home/nav/devhacks3/track2-study-match
+
+# Secrets + config live here (mode 600, gitignored). Generated on the host.
+EnvironmentFile=/home/nav/devhacks3/track2-study-match/socialmatch.conf
+
+# Bound to loopback only -> reachable solely via the Caddy reverse proxy
+# (devhacks.navraj.me -> localhost:3278 -> Cloudflare).
+ExecStart=/home/nav/devhacks3/track2-study-match/.venv/bin/python -m uvicorn server.app:app \
+    --host 127.0.0.1 --port 3278 \
+    --proxy-headers --forwarded-allow-ips=127.0.0.1,::1
+
+Restart=always
+RestartSec=5
+
+# --- Hardening ---------------------------------------------------------------
+# The app writes only the SQLite db under its own dir; everything else read-only.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/home/nav/devhacks3/track2-study-match
+
+[Install]
+WantedBy=multi-user.target

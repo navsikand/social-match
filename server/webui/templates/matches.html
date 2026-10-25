@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Matches — Social Match{% endblock %}
+{% block content %}
+<section class="hero">
+  <h1>Confirmed matches</h1>
+  <p class="muted">Plans both sides confirmed. Withdrawing is always one tap away on the card.</p>
+</section>
+
+<section class="panel">
+  <p id="matches-status" class="notice info">Loading matches…</p>
+  <div id="matches-list" class="cards"></div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+  const status = document.getElementById("matches-status");
+  const list = document.getElementById("matches-list");
+
+  function matchEl(item) {
+    const el = document.createElement("article");
+    el.className = "card candidate";
+    const h = document.createElement("h3");
+    h.textContent = item.display_name || item.pseudonym || ("Match " + (item.candidate_id || ""));
+    el.appendChild(h);
+    const when = document.createElement("p");
+    when.className = "muted";
+    when.textContent = (item.window && (item.window.display || item.window)) ||
+      item.display || "Window confirmed";
+    el.appendChild(when);
+    const href = item.card_url || (item.candidate_id ? "/m/" + item.candidate_id : null);
+    if (href) {
+      const a = document.createElement("a");
+      a.className = "button";
+      a.href = href;
+      a.textContent = "Open card";
+      el.appendChild(a);
+    }
+    return el;
+  }
+
+  (async function () {
+    try {
+      const res = await fetch("/api/matches", {headers: {"Accept": "application/json"}});
+      if (res.status === 404) {
+        show(status, "The match list service isn't connected yet. Check back soon.", "info");
+        return;
+      }
+      if (res.status === 401) {
+        window.location.href = "/login?next=/matches";
+        return;
+      }
+      if (!res.ok) {
+        show(status, "The match list isn't available right now.", "info");
+        return;
+      }
+      const data = await res.json();
+      const items = (data && (data.matches || data.candidates)) || [];
+      list.innerHTML = "";
+      for (const item of items) list.appendChild(matchEl(item));
+      if (items.length === 0) show(status, "No confirmed matches yet.", "info");
+      else status.hidden = true;
+    } catch (err) {
+      show(status, "The match list service isn't connected yet. Check back soon.", "info");
+    }
+  })();
+</script>
+{% endblock %}

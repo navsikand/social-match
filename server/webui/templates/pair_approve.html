@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Approve pairing — Social Match{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Approve Cubbie pairing</h1>
+  <p>An agent asked to pair with your account using this code:</p>
+  <p class="pair-code" id="pair-code">{{ code }}</p>
+  <p class="muted small">Only approve codes you started yourself. A code works once and expires quickly.</p>
+
+  {% if signed_in %}
+    <button id="approve" class="primary" type="button">Approve this code</button>
+    <p id="pair-status" class="notice" hidden></p>
+  {% else %}
+    <p id="signin-prompt" class="notice info">Sign in to approve this code.</p>
+    <p><a class="button" href="/login?next=/m/pair/{{ code|urlencode }}">Sign in and approve</a></p>
+  {% endif %}
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+  const approve = document.getElementById("approve");
+  const status = document.getElementById("pair-status");
+  const code = {{ code|tojson }};
+
+  if (approve) {
+    approve.addEventListener("click", async function () {
+      approve.disabled = true;
+      show(status, "Approving…", "info");
+      try {
+        const out = await postJSON("/api/pair/approve", {code: code});
+        if (out.res.ok) {
+          show(status, "Approved. Return to Cubbie and finish pairing.", "ok");
+        } else if (out.res.status === 401) {
+          show(status, "Your session expired.", "error");
+          const a = document.createElement("a");
+          a.href = "/login?next=" + encodeURIComponent("/m/pair/" + code);
+          a.textContent = " Sign in to approve.";
+          status.appendChild(a);
+        } else if (out.res.status === 404) {
+          show(status, "That code is unknown. Ask Cubbie for a new one.", "error");
+        } else if (out.res.status === 410) {
+          show(status, "That code is expired or already used. Ask Cubbie for a new one.", "error");
+        } else {
+          show(status, apiError(out.res, out.data), "error");
+        }
+      } catch (err) {
+        show(status, "Network error — is the server running?", "error");
+      } finally {
+        approve.disabled = false;
+      }
+    });
+  }
+</script>
+{% endblock %}

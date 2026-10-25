@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Social Match{% endblock %}
+{% block content %}
+<section class="hero">
+  <h1>Your match cards</h1>
+  <p class="muted">Cards appear here when Cubbie finds an overlap with someone who shares your intent.
+    Nothing is shared until both sides confirm.</p>
+</section>
+
+<section class="panel">
+  <h2>Open cards</h2>
+  <p id="dash-status" class="notice info">Loading your cards…</p>
+  <div id="dash-list" class="cards"></div>
+</section>
+
+<section class="panel" id="cubbie-skill">
+  <h2>Share your availability with Cubbie</h2>
+  <p>Cubbie reads your calendar, drops event titles, and keeps only free time ranges and hobby tags.
+    You review the exact payload before anything leaves your machine — the server only accepts the
+    allowlisted shape and rejects everything else.</p>
+  <ol class="steps">
+    <li>Pair this account with Cubbie so it can reach your inbox.</li>
+    <li>Ask Cubbie to compute your free windows for the next few weeks.</li>
+    <li>Approve the payload it shows you; availability expires after a few days and is never assumed stale.</li>
+  </ol>
+  <p><a href="/skill">Read the Cubbie skill instructions →</a></p>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+  // Placeholder fixture (CONTRACT §11): the dashboard endpoint is owned by a sibling phase,
+  // so the page renders this sample layout when /api/dashboard is missing.
+  const PLACEHOLDER_CANDIDATES = [
+    {candidate_id: null, card_url: "#", state: "open", sample_window: "Thu 19:00–21:00"},
+  ];
+
+  const status = document.getElementById("dash-status");
+  const list = document.getElementById("dash-list");
+
+  function cardEl(item) {
+    const el = document.createElement("article");
+    el.className = "card candidate";
+    const heading = document.createElement("h3");
+    heading.textContent = "Match card " + (item.candidate_id == null ? "" : "#" + item.candidate_id);
+    const meta = document.createElement("p");
+    meta.className = "muted";
+    meta.textContent = (item.window && (item.window.display || item.window)) ||
+      item.sample_window || "Window available on the card";
+    const state = document.createElement("p");
+    state.className = "pill";
+    state.textContent = item.state || "open";
+    el.appendChild(heading);
+    el.appendChild(meta);
+    el.appendChild(state);
+    if (item.card_url && item.card_url !== "#") {
+      const link = document.createElement("a");
+      link.className = "button";
+      link.href = item.card_url;
+      link.textContent = "View card";
+      el.appendChild(link);
+    }
+    return el;
+  }
+
+  function render(items, note) {
+    list.innerHTML = "";
+    for (const item of items) list.appendChild(cardEl(item));
+    if (items.length === 0) {
+      show(status, note || "No open cards right now.", "info");
+    } else {
+      status.hidden = true;
+    }
+  }
+
+  (async function () {
+    try {
+      const res = await fetch("/api/dashboard", {headers: {"Accept": "application/json"}});
+      if (res.status === 404 || res.status === 401) {
+        render(PLACEHOLDER_CANDIDATES,
+          res.status === 401
+            ? "Your session expired — sign in again."
+            : "The dashboard service isn't connected yet. This is a sample layout.");
+        return;
+      }
+      if (!res.ok) {
+        render(PLACEHOLDER_CANDIDATES, "The dashboard service isn't available yet. This is a sample layout.");
+        return;
+      }
+      const data = await res.json();
+      const items = (data && data.candidates) || [];
+      render(items);
+    } catch (err) {
+      render(PLACEHOLDER_CANDIDATES, "The dashboard service isn't available yet. This is a sample layout.");
+    }
+  })();
+</script>
+{% endblock %}

@@ -1,0 +1,8 @@
+{
+  "include": ["server", "tests", "demo", "skill/scripts"],
+  "exclude": ["**/__pycache__"],
+  "venvPath": ".",
+  "venv": ".venv",
+  "typeCheckingMode": "standard",
+  "reportMissingImports": "error"
+}

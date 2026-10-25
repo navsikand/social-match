@@ -1,0 +1,235 @@
+{% extends "base.html" %}
+{% block title %}Match card — Social Match{% endblock %}
+{% block content %}
+<section id="card-status" class="notice info">Loading card…</section>
+
+<article id="card" class="card match-card" hidden>
+  <header class="card-head">
+    <span id="avatar" class="avatar">🙂</span>
+    <div>
+      <h1 id="person">Someone</h1>
+      <p id="pseudonym" class="muted"></p>
+    </div>
+    <span id="state" class="pill"></span>
+  </header>
+
+  <p class="window"><strong id="window-display"></strong></p>
+  <p id="window-utc" class="muted small"></p>
+
+  <div id="reasons" class="reasons"></div>
+  <div id="tags" class="tags"></div>
+
+  <section class="actions">
+    <button id="yes" class="yes" type="button">Yes, let's do it</button>
+    <button id="no" class="no" type="button">No thanks</button>
+    <button id="counter-toggle" class="secondary" type="button">Suggest another time</button>
+    <button id="block" class="danger" type="button">Block</button>
+    <button id="report" class="danger" type="button">Report</button>
+    <button id="revoke" class="danger" type="button">Withdraw from this match</button>
+  </section>
+
+  <form id="counter-form" class="stack counter" hidden>
+    <p class="muted">Propose a different window. It must fit inside both people's shared availability.</p>
+    <label>Start
+      <input type="datetime-local" id="window-start" required>
+    </label>
+    <label>End
+      <input type="datetime-local" id="window-end" required>
+    </label>
+    <label>Time zone
+      <select id="tz">
+        <option value="America/Los_Angeles">America/Los_Angeles</option>
+        <option value="America/Denver">America/Denver</option>
+        <option value="America/Chicago">America/Chicago</option>
+        <option value="America/New_York">America/New_York</option>
+        <option value="Europe/London">Europe/London</option>
+        <option value="Europe/Berlin">Europe/Berlin</option>
+        <option value="Asia/Tokyo">Asia/Tokyo</option>
+        <option value="Australia/Sydney">Australia/Sydney</option>
+        <option value="UTC">UTC</option>
+      </select>
+    </label>
+    <button class="primary" type="submit">Send suggestion</button>
+  </form>
+
+  <p id="card-message" class="notice" hidden></p>
+</article>
+{% endblock %}
+{% block scripts %}
+<script>
+  const CANDIDATE_ID = {{ candidate_id }};
+  const AVATARS = ["🙂", "🐙", "🦊", "🐝", "🌱", "🎧", "🏔️", "📚"];
+
+  const statusEl = document.getElementById("card-status");
+  const cardEl = document.getElementById("card");
+  const message = document.getElementById("card-message");
+  let card = null;
+  let busy = false;
+
+  const errors = {
+    404: "This card isn't available any more (expired, withdrawn, or already handled).",
+    401: "Your session expired — sign in again.",
+    403: "You can't act on this card.",
+    409: "That action conflicts with a newer version of this card. Reload to see it.",
+  };
+
+  function fail(res, data) {
+    if (errors[res.status]) return errors[res.status];
+    return apiError(res, data);
+  }
+
+  function setBusy(value) {
+    busy = value;
+    for (const b of cardEl.querySelectorAll("button")) b.disabled = value;
+  }
+
+  function render(data) {
+    card = data;
+    const about = data.about || {};
+    const name = about.display_name || about.pseudonym || "Someone";
+    document.getElementById("person").textContent = name;
+    document.getElementById("pseudonym").textContent =
+      about.display_name && about.pseudonym ? "aka " + about.pseudonym : "";
+    const avatarIdx = (parseInt(about.preset_avatar_id, 10) || 1) - 1;
+    document.getElementById("avatar").textContent = AVATARS[avatarIdx] || AVATARS[0];
+    document.getElementById("state").textContent = data.state || "proposed";
+
+    const w = data.window || {};
+    document.getElementById("window-display").textContent = w.display || "Time to be confirmed";
+    document.getElementById("window-utc").textContent =
+      w.start_utc && w.end_utc ? w.start_utc + " → " + w.end_utc + " (" + (w.tz || "UTC") + ")" : "";
+    if (w.tz) {
+      const tz = document.getElementById("tz");
+      for (const opt of tz.options) if (opt.value === w.tz) tz.value = w.tz;
+    }
+
+    const reasons = data.reasons || {};
+    const parts = [];
+    if (reasons.shared_tags && reasons.shared_tags.length) {
+      parts.push("Shared interests: " + reasons.shared_tags.join(", "));
+    }
+    if (reasons.overlap_hours) parts.push(reasons.overlap_hours + "h of shared free time");
+    if (reasons.both_want_event) parts.push("You both want to go to something");
+    const reasonsEl = document.getElementById("reasons");
+    reasonsEl.innerHTML = "";
+    for (const p of parts) {
+      const el = document.createElement("p");
+      el.textContent = p;
+      reasonsEl.appendChild(el);
+    }
+
+    const tagsEl = document.getElementById("tags");
+    tagsEl.innerHTML = "";
+    for (const tag of (about.hobby_tags || [])) {
+      const span = document.createElement("span");
+      span.className = "tag";
+      span.textContent = tag;
+      tagsEl.appendChild(span);
+    }
+    statusEl.hidden = true;
+    cardEl.hidden = false;
+  }
+
+  async function swipe(direction) {
+    if (!card || busy) return;
+    setBusy(true);
+    show(message, "Sending…", "info");
+    try {
+      const out = await postJSON("/api/swipe", {
+        candidate_id: CANDIDATE_ID,
+        proposal_version: card.proposal_version,
+        direction: direction,
+      });
+      if (out.res.ok) {
+        show(message, direction === "right"
+          ? "Confirmed your side. We'll tell you when they confirm too."
+          : "Done.", "ok");
+        if (direction !== "right") setTimeout(function () { window.location.href = "/"; }, 900);
+        else setTimeout(function () { window.location.href = "/matches"; }, 900);
+      } else {
+        show(message, fail(out.res, out.data), "error");
+      }
+    } catch (err) {
+      show(message, "Network error — is the server running?", "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revoke() {
+    if (!card || busy) return;
+    if (!window.confirm("Withdraw from this match? Both sides will be told the plan is off.")) return;
+    setBusy(true);
+    show(message, "Withdrawing…", "info");
+    try {
+      const out = await postJSON("/api/revoke", {candidate_id: CANDIDATE_ID});
+      if (out.res.ok) {
+        show(message, "Withdrawn.", "ok");
+        setTimeout(function () { window.location.href = "/"; }, 900);
+      } else {
+        show(message, fail(out.res, out.data), "error");
+      }
+    } catch (err) {
+      show(message, "Network error — is the server running?", "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  document.getElementById("yes").addEventListener("click", function () { swipe("right"); });
+  document.getElementById("no").addEventListener("click", function () { swipe("left"); });
+  document.getElementById("block").addEventListener("click", function () {
+    if (window.confirm("Block this person? You won't be matched again.")) swipe("block");
+  });
+  document.getElementById("report").addEventListener("click", function () {
+    if (window.confirm("Report this card to moderation?")) swipe("report");
+  });
+  document.getElementById("revoke").addEventListener("click", revoke);
+  document.getElementById("counter-toggle").addEventListener("click", function () {
+    const form = document.getElementById("counter-form");
+    form.hidden = !form.hidden;
+  });
+
+  document.getElementById("counter-form").addEventListener("submit", async function (ev) {
+    ev.preventDefault();
+    if (!card || busy) return;
+    setBusy(true);
+    show(message, "Sending suggestion…", "info");
+    try {
+      const out = await postJSON("/api/counter", {
+        candidate_id: CANDIDATE_ID,
+        window_start: document.getElementById("window-start").value,
+        window_end: document.getElementById("window-end").value,
+        tz: document.getElementById("tz").value,
+      });
+      if (out.res.ok) {
+        show(message, "Suggestion sent. The card will update when they respond.", "ok");
+        setTimeout(function () { window.location.reload(); }, 900);
+      } else {
+        show(message, fail(out.res, out.data), "error");
+      }
+    } catch (err) {
+      show(message, "Network error — is the server running?", "error");
+    } finally {
+      setBusy(false);
+    }
+  });
+
+  (async function () {
+    try {
+      const res = await fetch("/api/card/" + CANDIDATE_ID, {headers: {"Accept": "application/json"}});
+      let data = null;
+      try { data = await res.json(); } catch (err) { data = null; }
+      if (!res.ok) {
+        statusEl.className = "notice error";
+        statusEl.textContent = fail(res, data);
+        return;
+      }
+      render(data || {});
+    } catch (err) {
+      statusEl.className = "notice error";
+      statusEl.textContent = "The card service isn't available right now. Try again later.";
+    }
+  })();
+</script>
+{% endblock %}
