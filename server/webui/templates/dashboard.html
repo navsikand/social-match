@@ -9,6 +9,8 @@
 
 <section class="panel">
   <h2>Open cards</h2>
+  <p id="dash-photo" class="notice warn" hidden>A photo is required before you can appear on
+    a card or be matched. <a href="/settings">Upload one on Settings</a>.</p>
   <p id="dash-status" class="notice info">Loading your cards…</p>
   <div id="dash-list" class="cards"></div>
 </section>
@@ -88,6 +90,8 @@
       }
       const data = await res.json();
       const items = (data && data.candidates) || [];
+      const photoNotice = document.getElementById("dash-photo");
+      if (photoNotice) photoNotice.hidden = Boolean(data && data.has_photo);
       render(items);
     } catch (err) {
       render(PLACEHOLDER_CANDIDATES, "The dashboard service isn't available yet. This is a sample layout.");

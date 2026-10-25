@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
-from server import config, db, photos, sessions, wording
+from server import config, db, matching, photos, sessions, wording
 
 router = APIRouter(tags=["photos"])
 
@@ -248,6 +248,12 @@ async def publish_photo(
     # Bytes of the previous revision are reclaimed by sweep.purge_orphan_photos after the
     # grace window; this request only ever knew its own filename, which is why per-request
     # cleanup was a bug (it could delete a newer upload).
+
+    # A photo is mandatory before anyone is matchable, so publishing it may be the moment this
+    # student first qualifies. Regenerate for every available user, in its own short transaction.
+    with contextlib.suppress(Exception):
+        with db.immediate(conn):
+            matching.refresh_all(conn)
 
     return JSONResponse(
         status_code=200,

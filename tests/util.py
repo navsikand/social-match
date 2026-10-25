@@ -18,13 +18,19 @@ def to_utc(local_s: str, tz: str) -> str:
     return dt.astimezone(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def mk_user(email: str, name: str, avatar_id: int = 1) -> int:
+def mk_user(email: str, name: str, avatar_id: int = 1, photo: bool = True) -> int:
+    """Seed a user. A photo is MANDATORY for matching (owner's call), so the default includes
+    one; pass photo=False to test the unmatchable state."""
     c = conn()
     try:
         c.execute(
             "INSERT INTO users (email, password_hash, display_name, preset_avatar_id,"
-            " adult_attested_at, created_at) VALUES (?,?,?,?,?,?)",
-            (email, None, name, avatar_id, db.utcnow(), db.utcnow()),
+            " adult_attested_at, created_at, photo_path)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (
+                email, None, name, avatar_id, db.utcnow(), db.utcnow(),
+                f"{email.split('@')[0]}.jpg" if photo else None,
+            ),
         )
         return c.execute("SELECT last_insert_rowid()").fetchone()[0]
     finally:

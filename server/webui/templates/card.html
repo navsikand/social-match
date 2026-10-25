@@ -128,8 +128,8 @@
     const about = data.about || {};
     const name = about.display_name || about.pseudonym || "Someone";
     document.getElementById("person").textContent = name;
-    document.getElementById("pseudonym").textContent =
-      about.display_name && about.pseudonym ? "aka " + about.pseudonym : "";
+    // Owner's call: the real name is shown, so the pseudonym line is retired.
+    document.getElementById("pseudonym").textContent = "";
     const avatarIdx = (parseInt(about.preset_avatar_id, 10) || 1) - 1;
     document.getElementById("avatar").textContent = AVATARS[avatarIdx] || AVATARS[0];
     renderPhoto(about.photo_url || null);

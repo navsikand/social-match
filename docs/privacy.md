@@ -19,10 +19,12 @@ Only these things, and only because matching does not work without them:
 - Interests: at most eight short tags (32 characters each), in your own words — "matcha", "sourdough", "bouldering".
   These are the only free-text field in your *structured state*, and they are tightly bounded: no line breaks, no control
   characters, no paragraph. The server translates each one onto its matching vocabulary ("matcha" counts as coffee).
-  Your raw words stay attached to your own account and are shown back to you; **only the canonical tag ever appears
-  on a card**, so your phrasing is never shown to another student. An interest nothing matches is kept for you and
-  never scored. (The chat box is a second, separate free-text surface. It is described below, and it is not structured
-  state.)
+  Your raw words stay attached to your own account. **A card shows the words the other student actually typed**
+  ("matcha"), because that is what a person wants to read; the canonical tag ("coffee") is only how the matcher makes
+  two different words comparable. Raw interests are bounded on write (at most eight, 32 characters each, no control
+  characters or line breaks) and are only ever served to the other member of the same match pair. An interest nothing
+  matches is kept for you and never scored. (The chat box is a second, separate free-text surface. It is described
+  below, and it is not structured state.)
 - Wants: zero to two words from `hangout` and `event` — whether you would rather meet up or go to an
   event. Nothing else fits the field, so nothing else can be written into it.
 - Public events: if you approve it, up to ten links to public event pages (a career fair, a concert), each with its
@@ -116,12 +118,12 @@ deployment leaves it off until you turn it on yourself.
   between your withdrawal and the write.
 - It never covers swiping or confirming a plan. A swipe is yours; a confirmation is yours. Those stay human presses.
 
-YOUR PHOTO, IF YOU PUBLISH ONE
+YOUR PHOTO (REQUIRED TO BE MATCHED)
 
-A photo is off until you press the publish button on your own settings page in a web session. Sending your availability
-from a client neither publishes it nor removes it, and sending your availability again leaves it exactly as it was.
-Publishing a different image later is a new decision, not an edit, because it is a different picture about to be shown
-to people you have not met.
+A photo is required before you can appear on a card or be matched with anyone: upload one on your own settings page in
+a web session. Nothing else publishes it — sending your availability from a client neither publishes nor removes it, and
+sending your availability again leaves it exactly as it was. Publishing a different image later is a new decision, not
+an edit, because it is a different picture about to be shown to people you have not met.
 
 Who can see it: signed-in students who are holding your live card — that is, people you have been matched with, **before**
 either of you confirms anything. Nobody else. It is not public and it is not indexed by search engines. Its address is

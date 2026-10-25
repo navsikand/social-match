@@ -257,7 +257,28 @@ class Demo:
             "agent_id": None,
             "cursor": 0,
         }
+        # A photo is MANDATORY before anyone is matchable, so every demo student publishes one
+        # immediately after registering — the same click a real user makes on Settings.
+        self.publish_photo(key)
         return self.u[key]
+
+    def publish_photo(self, key: str) -> None:
+        """Upload a tiny real PNG through the real endpoint (the demo never seeds the DB)."""
+        import io
+
+        from PIL import Image  # shipped with the app's photo pipeline
+
+        buf = io.BytesIO()
+        Image.new("RGB", (240, 240), (200, 120, 80)).save(buf, format="PNG")
+        r = self.client(key).post(
+            "/api/me/photo",
+            content=buf.getvalue(),
+            headers={"Content-Type": "image/png"},
+        )
+        check(
+            r.status_code == 200 and r.json().get("ok") is True,
+            f"POST /api/me/photo for {self.name(key)} → {r.status_code} {r.text[:200]}",
+        )
 
     def pair(self, key: str) -> dict:
         label = f"cubbie-{self.name(key).lower()}"
@@ -508,7 +529,13 @@ def beat_5_card(d: Demo) -> None:
     check(r.status_code == 200, f"GET /api/card/{cid} (Ava) → {r.status_code} {r.text}")
     card = r.json()
     about, win, reasons = card["about"], card["window"], card["reasons"]
-    check(about["display_name"] is None, f"Ben granted only `card`: display_name must be null, got {about}")
+    # Owner's call (supersedes the old tier-gated rule): a matched pair always sees the real
+    # name. The pseudonym is still emitted, but is no longer what the student sees.
+    check(about["display_name"] == "Ben", f"card must show the real name, got {about}")
+    check(
+        about["interests_raw"] and "climbing" in about["interests_raw"],
+        f"the card must carry the words the student typed, got {about.get('interests_raw')}",
+    )
     check(
         isinstance(about["pseudonym"], str) and PSEUDONYM_RE.fullmatch(about["pseudonym"]) is not None,
         f"pseudonym should be tag-<4hex>, got {about['pseudonym']!r}",

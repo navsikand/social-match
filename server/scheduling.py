@@ -159,6 +159,8 @@ def _log_consent(conn, uid: int, action: str, scope: str, detail: dict) -> None:
 
 def dashboard(conn, uid: int) -> dict:
     now = db.utcnow()
+    me = db.one(conn, "SELECT photo_path FROM users WHERE id=?", (uid,))
+    has_photo = bool(me and me["photo_path"])
     rows = db.q(
         conn,
         "SELECT * FROM candidates WHERE (user_a=? OR user_b=?) AND state='open' AND expires_at > ?"
@@ -166,6 +168,7 @@ def dashboard(conn, uid: int) -> dict:
         (uid, uid, now),
     )
     return {
+        "has_photo": has_photo,
         "candidates": [
             {
                 "candidate_id": row["id"],
@@ -294,15 +297,31 @@ def card(conn, uid: int, candidate_id: int) -> dict:
     tz = display_tz(conn, cand)
     about = db.one(conn, "SELECT * FROM users WHERE id=?", (about_uid,))
     tags = [r["tag"] for r in db.q(conn, "SELECT tag FROM hobby_tags WHERE user_id=? ORDER BY tag", (about_uid,))]
+    # Product decision (owner's call): show the words the other student actually typed, not the
+    # canonical vocabulary the matcher scores. `matcha` is what they wrote; `coffee` is only how
+    # two different words are made comparable. Raw words are bounded on write (<=32 chars, no
+    # control characters), and this card is only ever served to a member of the same pair.
+    interests_raw = [
+        r["raw"]
+        for r in db.q(
+            conn,
+            "SELECT raw FROM interest_raw WHERE user_id=? AND canonical IS NOT NULL ORDER BY raw",
+            (about_uid,),
+        )
+    ]
     return {
         "candidate_id": cand["id"],
         "proposal_id": prop["id"],
         "proposal_version": prop["version"],
         "about": {
             "pseudonym": wording.pseudonym_for(conn, about_uid),
-            "display_name": about["display_name"] if wording.name_visible(conn, about_uid) else None,
+            # Product decision (owner's call): a card shows the person's real display name.
+            # The pseudonym stays in the payload only as a fallback for clients, and the
+            # publication tier no longer hides the name from a matched pair.
+            "display_name": about["display_name"],
             "preset_avatar_id": about["preset_avatar_id"],
             "hobby_tags": tags,
+            "interests_raw": interests_raw,
             # PLAN §B5 / gate review P1: the URL lives inside `about`, which is what
             # card.html reads. Emitted top-level, the card silently kept the avatar.
             "photo_url": photo_api.card_photo_url(conn, uid, about_uid),

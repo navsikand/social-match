@@ -142,7 +142,7 @@ def test_publish_jpeg_sets_columns(client, uploads):
 
 
 def test_publish_rejects_oversize_declared_body(client, uploads):
-    uid = util.mk_user("big@example.com", "Big")
+    uid = util.mk_user("big@example.com", "Big", photo=False)  # nothing stored before the upload
     _sign(client, uid)
 
     r = client.post(

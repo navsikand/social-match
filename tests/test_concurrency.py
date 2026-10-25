@@ -364,7 +364,9 @@ def test_card_shape_and_non_counterpart_404(seeded, client):
     assert body["candidate_id"] == cid
     assert body["proposal_id"] == pid
     assert body["proposal_version"] == 1
-    assert body["about"]["display_name"] is None  # b granted only 'card'
+    # Owner's call (supersedes the old tier-gated behaviour): a matched pair always sees the
+    # real display name. The pseudonym is still emitted as a fallback for clients.
+    assert body["about"]["display_name"] == "Ben"
     assert body["about"]["pseudonym"]
     assert body["about"]["preset_avatar_id"] == 1
     assert body["about"]["hobby_tags"] == ["climbing"]

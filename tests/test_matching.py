@@ -240,6 +240,33 @@ def test_expired_counterpart_is_skipped():
     assert candidate_for(a, b) is None
 
 
+def test_no_photo_means_no_card_for_either_side():
+    """Owner's call: a photo is mandatory. Without one you neither get a card nor appear on one."""
+    a = util.mk_user("nopic-a@x.test", "NoPicA", photo=False)
+    b = util.mk_user("nopic-b@x.test", "NoPicB")
+    util.grant(a, "matching")
+    util.grant(b, "matching")
+    util.grant(a, "publication", "card")
+    util.grant(b, "publication", "card")
+    util.windows(a, [("2026-10-29T19:00:00", "2026-10-29T21:00:00")])
+    util.windows(b, [("2026-10-29T19:00:00", "2026-10-29T21:00:00")])
+
+    assert gen(a) == [], "a user without a photo must never be matched"
+    assert gen(b) == [], "and must never be given a card about someone else"
+
+    # Publishing the photo is what makes both sides eligible: refresh_all covers the user who
+    # uploaded late, whose counterpart had already been generated against the old state.
+    conn = util.conn()
+    try:
+        with db.immediate(conn):
+            conn.execute("UPDATE users SET photo_path='a.jpg' WHERE id=?", (a,))
+        with db.immediate(conn):
+            made = matching.refresh_all(conn)
+        assert made >= 1, "photo upload must immediately create the pending candidate"
+    finally:
+        conn.close()
+
+
 def test_missing_matching_grant_on_one_side_means_no_candidate():
     a, b = _setup(b_matching=False)
     assert gen(a) == []

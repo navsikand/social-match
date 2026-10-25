@@ -34,6 +34,12 @@ def _ts(value: str) -> datetime.datetime:
     )
 
 
+def _has_photo(conn, user_id: int) -> bool:
+    """Owner's call: a photo is REQUIRED before anyone appears on a card."""
+    row = conn.execute("SELECT photo_path FROM users WHERE id=?", (user_id,)).fetchone()
+    return bool(row and row["photo_path"])
+
+
 def _windows(conn, user_id: int):
     return conn.execute(
         "SELECT starts_at, ends_at, tz FROM availability_windows WHERE user_id=? ORDER BY starts_at",
@@ -170,6 +176,10 @@ def generate_for_user(conn, user_id: int) -> list[int]:
     now = db.utcnow()
     skips: collections.Counter[str] = collections.Counter()
 
+    # A photo is mandatory (owner's call): no photo, no card, for either side of a pair.
+    if not _has_photo(conn, user_id):
+        log.info("user=%s pass=aborted reason=no_photo_of_my_own", user_id)
+        return []
     mine = _windows(conn, user_id)
     if not mine:
         log.info("user=%s pass=aborted reason=no_windows_of_my_own", user_id)
@@ -239,6 +249,10 @@ def generate_for_user(conn, user_id: int) -> list[int]:
             continue
         if wording.live_grant(conn, other_id, "publication", "card") is None:
             skip("publication_card_missing_them", other_id)
+            continue
+
+        if not _has_photo(conn, other_id):
+            skip("other_has_no_photo", other_id)
             continue
 
         their_windows = _windows(conn, other_id)
@@ -330,3 +344,24 @@ def generate_for_user(conn, user_id: int) -> list[int]:
             user_id,
         )
     return new_ids
+
+
+def refresh_all(conn) -> int:
+    """Re-run generation for every user with live availability.
+
+    Called after a photo is published: a photo is mandatory, so a student who uploads it AFTER
+    their availability was written would otherwise wait for someone else's next write to become
+    matchable at all. Returns the number of candidates created across all passes.
+    """
+    now = db.utcnow()
+    users = [
+        row["user_id"]
+        for row in conn.execute(
+            "SELECT user_id FROM availability WHERE expires_at > ? ORDER BY user_id", (now,)
+        )
+    ]
+    created = 0
+    for uid in users:
+        created += len(generate_for_user(conn, uid))
+    log.info("refresh_all users=%s new=%s", len(users), created)
+    return created
