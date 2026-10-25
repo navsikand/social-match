@@ -842,6 +842,121 @@ def test_confirm_conflict_deletes_the_row_and_applies_no_rider(client, monkeypat
     assert _rider_counts(uid) == (0, 0), "the interest_raw rider must not have applied"
 
 
+# ------------------------------------------------------------------ section: deletion safety
+# Gate review P1 #3: provider work that finishes AFTER delete_account must not recreate chat
+# rows, reserve budget or apply actions for an account that no longer exists.
+
+
+def _soft_delete(uid: int) -> None:
+    """Delete the account the way the cascade does, but from inside a streamed turn."""
+    conn = db.connect()
+    try:
+        with db.immediate(conn):
+            conn.execute(
+                "UPDATE users SET deleted_at=?, email=? WHERE id=?",
+                (db.utcnow(), f"deleted-{uid}@invalid", uid),
+            )
+            conn.execute("DELETE FROM chat_messages WHERE user_id=?", (uid,))
+            conn.execute("DELETE FROM chat_pending WHERE user_id=?", (uid,))
+            conn.execute("DELETE FROM chat_turns WHERE user_id=?", (uid,))
+    finally:
+        conn.close()
+
+
+def deletes_the_account_mid_stream(uid: int, text: str):
+    """The provider finishes only after the account is gone: the exact P1 window."""
+
+    async def fake(system, messages, *, transport=None):
+        _soft_delete(uid)
+        for start in range(0, len(text), 40):
+            yield text[start : start + 40]
+
+    return fake
+
+
+def _chat_row_counts(uid: int) -> tuple[int, int, int]:
+    conn = db.connect()
+    try:
+        return (
+            db.one(conn, "SELECT COUNT(*) AS n FROM chat_messages WHERE user_id=?", (uid,))["n"],
+            db.one(conn, "SELECT COUNT(*) AS n FROM chat_pending WHERE user_id=?", (uid,))["n"],
+            db.one(conn, "SELECT COUNT(*) AS n FROM chat_turns WHERE user_id=?", (uid,))["n"],
+        )
+    finally:
+        conn.close()
+
+
+def test_completed_turn_after_deletion_writes_nothing(client, monkeypatch):
+    uid = _register(client)
+    text = "All done.\n```json\n{\"actions\": [{\"op\": \"set_busy_load\", \"value\": 2}]}\n```\n"
+    monkeypatch.setattr(chat.ai, "stream_reply", deletes_the_account_mid_stream(uid, text))
+
+    r = client.post("/api/chat", json={"content": "busy week"})
+
+    assert r.status_code == 200
+    assert last_event(r, "done")["type"] == "done"
+    assert _chat_row_counts(uid) == (0, 0, 0)
+    conn = db.connect()
+    try:
+        assert db.one(conn, "SELECT COUNT(*) AS n FROM user_load WHERE user_id=?", (uid,))["n"] == 0
+    finally:
+        conn.close()
+
+
+def test_proposal_after_deletion_stores_no_preview(client, monkeypatch):
+    uid = _register(client)
+    text = (
+        "Here you go.\n```json\n"
+        + json.dumps({"actions": [{"op": "set_windows", "windows": [WINDOW_OK]}]})
+        + "\n```\n"
+    )
+    monkeypatch.setattr(chat.ai, "stream_reply", deletes_the_account_mid_stream(uid, text))
+
+    r = client.post("/api/chat", json={"content": "free Thursday"})
+
+    assert events_of(r)[-1]["type"] == "done"
+    assert not [e for e in events_of(r) if e["type"] == "preview"]
+    assert _chat_row_counts(uid) == (0, 0, 0)
+    conn = db.connect()
+    try:
+        assert db.one(
+            conn, "SELECT COUNT(*) AS n FROM availability_windows WHERE user_id=?", (uid,)
+        )["n"] == 0
+    finally:
+        conn.close()
+
+
+def test_error_note_after_deletion_persists_nothing(client, monkeypatch):
+    uid = _register(client)
+
+    async def broken(system, messages, *, transport=None):
+        _soft_delete(uid)
+        raise chat.ai.AIError("ai_timeout", "the provider took too long")
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(chat.ai, "stream_reply", broken)
+
+    r = client.post("/api/chat", json={"content": "hello?"})
+
+    assert last_event(r, "error")["code"] == "ai_timeout"
+    assert _chat_row_counts(uid) == (0, 0, 0), "no note may be recreated for a deleted account"
+
+
+def test_reserve_turn_refuses_for_a_deleted_account(client):
+    uid = _register(client)
+    _soft_delete(uid)
+    conn = db.connect()
+    try:
+        assert chat.reserve_turn(conn, uid, "negotiation", "offer:1") is False
+        assert db.one(
+            conn, "SELECT COUNT(*) AS n FROM chat_turns WHERE user_id=?", (uid,)
+        )["n"] == 0
+        assert chat.persist_note(conn, uid, "a note") is None
+        assert chat.persist_final_assistant(conn, uid, "text") is None
+    finally:
+        conn.close()
+
+
 # ------------------------------------------------------------------ section: lifecycle
 
 

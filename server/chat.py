@@ -136,6 +136,23 @@ def _user_alive(conn, uid: int) -> bool:
     return row is not None and row["deleted_at"] is None
 
 
+@contextlib.contextmanager
+def _live_write(conn, uid: int):
+    """Run a chat write for `uid` only while the account still exists (gate review P1 #3).
+
+    Provider work can finish AFTER `delete_account`'s cascade has committed. Without this guard
+    the completion re-creates chat_messages / chat_pending / chat_turns for a deleted account.
+    When the caller already holds a transaction we join it (SQLite cannot nest BEGIN IMMEDIATE),
+    so the liveness read and the write share one transaction's atomicity. Yields True when the
+    caller may write.
+    """
+    if conn.in_transaction:
+        yield _user_alive(conn, uid)
+        return
+    with db.immediate(conn):
+        yield _user_alive(conn, uid)
+
+
 def _first_error(exc: ValidationError) -> str:
     first = exc.errors()[0]
     where = ".".join(str(p) for p in first.get("loc", ()))
@@ -274,21 +291,28 @@ def state_summary(conn, uid: int) -> dict:
 # --------------------------------------------------------------------- ledger + transcripts
 
 
-def reserve_turn(conn, uid: int, kind: str, ref: str | None = None) -> None:
-    """Count this turn against the user's rate window; raise ChatRateLimited past the cap."""
+def reserve_turn(conn, uid: int, kind: str, ref: str | None = None) -> bool:
+    """Count this turn against the user's rate window; raise ChatRateLimited past the cap.
+
+    Returns False when the account is gone: a deleted account must not reserve budget either.
+    """
     now = db.utcnow()
     cutoff = _shift(now, minutes=-RATE_WINDOW_MINUTES)
-    used = db.one(
-        conn,
-        "SELECT COUNT(*) AS n FROM chat_turns WHERE user_id=? AND at > ?",
-        (uid, cutoff),
-    )["n"]
-    if used >= RATE_LIMIT:
-        raise ChatRateLimited()
-    conn.execute(
-        "INSERT INTO chat_turns (user_id, kind, ref, at) VALUES (?,?,?,?)",
-        (uid, kind, ref, now),
-    )
+    with _live_write(conn, uid) as alive:
+        if not alive:
+            return False
+        used = db.one(
+            conn,
+            "SELECT COUNT(*) AS n FROM chat_turns WHERE user_id=? AND at > ?",
+            (uid, cutoff),
+        )["n"]
+        if used >= RATE_LIMIT:
+            raise ChatRateLimited()
+        conn.execute(
+            "INSERT INTO chat_turns (user_id, kind, ref, at) VALUES (?,?,?,?)",
+            (uid, kind, ref, now),
+        )
+    return True
 
 
 def _persist_message(conn, uid: int, role: str, content: str) -> None:
@@ -302,14 +326,24 @@ def persist_user_message(conn, uid: int, text: str) -> None:
     _persist_message(conn, uid, "user", text)
 
 
-def persist_final_assistant(conn, uid: int, text: str) -> None:
-    if text.strip():
+def persist_final_assistant(conn, uid: int, text: str) -> bool | None:
+    """Returns None when the account is gone: run_turn then treats the turn as dropped."""
+    if not text.strip():
+        return True
+    with _live_write(conn, uid) as alive:
+        if not alive:
+            return None
         _persist_message(conn, uid, "assistant", text)
+    return True
 
 
-def persist_note(conn, uid: int, text: str) -> None:
-    """Server-templated FACT only — never provider prose."""
-    _persist_message(conn, uid, "note", text)
+def persist_note(conn, uid: int, text: str) -> bool | None:
+    """Server-templated FACT only — never provider prose. No-ops for a deleted account."""
+    with _live_write(conn, uid) as alive:
+        if not alive:
+            return None
+        _persist_message(conn, uid, "note", text)
+    return True
 
 
 def purge_chat(conn, now: str) -> int:
@@ -635,10 +669,15 @@ def _merge_ops(
 # --------------------------------------------------------------------- pending preview store
 
 
-def _store_pending(conn, uid: int, kind: str, ops: list[dict], items: list[dict], state_hash: str) -> int:
+def _store_pending(
+    conn, uid: int, kind: str, ops: list[dict], items: dict, state_hash: str
+) -> int | None:
+    """One preview row. Returns None when the account is gone (nothing is stored)."""
     now = db.utcnow()
     payload = json.dumps({"ops": ops, "items": items})
     with db.immediate(conn):
+        if not _user_alive(conn, uid):
+            return None
         conn.execute("DELETE FROM chat_pending WHERE user_id=?", (uid,))
         cursor = conn.execute(
             "INSERT INTO chat_pending (user_id, kind, payload_json, state_hash, created_at,"
@@ -810,7 +849,11 @@ async def run_turn(conn, uid: int, turn: Turn) -> AsyncIterator[dict]:
         yield {"type": "done"}
         return
 
-    persist_final_assistant(conn, uid, text)
+    if persist_final_assistant(conn, uid, text) is None:
+        # The account was deleted while the provider was thinking: a dropped turn. The text
+        # was not stored, and no action may run (there is nobody to apply it for).
+        yield {"type": "done"}
+        return
 
     actions, refusal = _json_action_block(text)
     if refusal is not None:
@@ -851,6 +894,9 @@ async def run_turn(conn, uid: int, turn: Turn) -> AsyncIterator[dict]:
             yield {"type": "done"}
             return
         pending_id = _store_pending(conn, uid, kind, ops, items, h0)
+        if pending_id is None:  # the account went away mid-turn: nothing is stored
+            yield {"type": "done"}
+            return
         yield {"type": "preview", "id": pending_id, "kind": kind, "items": items}
         yield {"type": "state", "state": state_summary(conn, uid)}
         yield {"type": "done"}
