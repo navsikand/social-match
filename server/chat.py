@@ -476,6 +476,26 @@ def _profile_lines(conn, uid: int) -> list[str]:
     lines.append(
         f"- Matching enabled in Settings: {'yes' if matching_on else 'NO — matches cannot appear until they enable it'}"
     )
+    # Ground truth about the preview card. Without this the assistant tells a student who just
+    # pressed Confirm that their preview "is still sitting there" — it cannot see the click.
+    pending_row = _latest_pending(conn, uid)
+    if pending_row is None:
+        lines.append("- Preview card waiting for Confirm: none")
+    else:
+        lines.append(
+            f"- Preview card waiting for Confirm: kind={pending_row['kind']} "
+            f"(id {pending_row['id']}, expires {pending_row['expires_at']}). This is NOT yet saved."
+        )
+    lines.append(
+        "- Windows already SAVED for the matcher: "
+        f"{len(payload.windows)}"
+        + (
+            " — a confirmed save has already happened; never tell the student their windows are "
+            "unsaved when this is above zero."
+            if payload.windows
+            else " (nothing saved yet)"
+        )
+    )
     return lines
 
 
@@ -501,12 +521,19 @@ def build_system_prompt(conn, uid: int, turn: Turn) -> str:
         "",
         "TIME CONTEXT",
         f"- Today's date (UTC clock): {datetime.datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M UTC')}",
-        f"- The user's last stored timezone: {_last_stored_tz(conn, uid)} — when the user asks for "
-        "something vague like 'free all week', 'weeknights' or 'this weekend', PROPOSE concrete "
-        "windows in that timezone as a set_windows batch (they will preview and Confirm; nothing "
-        "is saved until they do). Always spell out the dates and times you chose so the user can "
-        "correct you. Never refuse to concretise vague free time — proposing is your job; "
-        "confirming is theirs.",
+        f"- The user's last stored timezone: {_last_stored_tz(conn, uid)}",
+        "- TIMEZONE RULE (hard): if the stored timezone is 'unknown', you MUST ask for one and "
+        "MUST NOT propose any time in the same reply. Never substitute a default like UTC, "
+        "Europe/London or America/New_York — guessing it silently produces windows at the wrong "
+        "hour and no match ever happens.",
+        "- CANONICAL SLOTS (hard): for a vague request ('free all week', 'weekends', 'free most "
+        "evenings') propose exactly this grid, in the user's timezone, as ONE set_windows batch: "
+        "the next two Saturdays and the next two Sundays, each 14:00-17:00. Same grid for every "
+        "student, by design: two people who both say 'free weekends' must land on overlapping "
+        "time. Only deviate when the student names specific times — then use theirs verbatim.",
+        "- Spell out the dates and times you chose so the user can correct you. Never refuse to "
+        "concretise vague free time — proposing is your job; confirming is theirs (they get a "
+        "preview card; nothing is saved until they press Confirm).",
         "",
         "MATCHING REALITY CHECK (the server enforces this, not you)",
         "- You can never change grants, and matching is off for a student who has never turned "
