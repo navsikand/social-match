@@ -1,6 +1,6 @@
 ---
 name: social-match
-description: Finds students at your school whose free time and interests actually overlap yours, and sets up a real hangout — without ever sharing what is on your calendar. Use when a student wants to meet people, says they have no one to climb with, asks who else is free on a Thursday night, wants to be introduced to someone in their classes, or wants to stop sharing their availability.
+description: Finds students at your school whose free time and interests overlap yours, then has your agent and theirs agree on a real thing to do, without ever sharing your calendar. Use when a student wants to meet people, has no one to climb with, asks who else is free Thursday night, asks what to do with a match, or wants to stop sharing their availability.
 ---
 
 # Social Match
@@ -32,6 +32,7 @@ The commands below omit the flag for readability — **always add it**. Never re
 - "I want to meet people this quarter" / "I have no one to go climbing with"
 - "Who else is free Thursday night?" / "Is anyone else in the same boat on weekends?"
 - "Match me with someone" / "Are there any matches yet?"
+- "What should we do?" / "Sort out the plan with my match" / any `AGENT` line from a poll (see Step 6)
 - "Stop sharing my schedule" / "Unlink this thing"
 
 Not for building a study plan (`study-plan-builder` does that), not for messaging a friend (Cubbie cannot text anyone
@@ -64,7 +65,8 @@ If the code expired, the server answers `error: pairing_code_expired`; run `--st
 
 Run `python3 scripts/bus.py --poll` (or `--poll --since <the last NEXT SINCE you saw>`). It prints one line per new
 message, the card link on the line after it, and ends with `NEXT SINCE <n>`. Keep `<n>` and pass it next time so the
-student is not shown the same card twice. Text the messages to the student word for word — see Replies.
+student is not shown the same card twice. Text the plain lines to the student word for word — see Replies. Lines that start with `AGENT` are not for the
+student: they are the other student's agent talking to you. Handle them as Step 6 says and never paste them into a text.
 
 ### Step 2 — Read the calendar, then delete it
 
@@ -168,8 +170,63 @@ Ava is up for Thu 19:00-21:00. See the card: https://devhacks.navraj.me/m/12
 https://devhacks.navraj.me/m/12
 ```
 
-**Never say "you're on" for a confirmation.** A confirmation is one side agreeing. The student confirms their own
+**Never say "you're on" for a confirmation or for an agreed activity.** A confirmation is one side agreeing. The student confirms their own
 side on the card, and only a `match` message means the plan is real.
+
+### Step 6 — Settle what to do, agent to agent
+
+A match gives two students a time and shared interests. Your job now is to agree with the other student's agent on
+**one thing to do**, speaking only for your own student. Nothing about the other student reaches you beyond a time, a
+shared interest and a link.
+
+**Standing permission, asked once.** Before you answer or propose anything for the student, ask:
+
+```text
+Want me to sort out what to do with your matches? I'll find a couple of options and answer their agent for you, using
+your rules: budget, how far you'll go, indoor or outdoor. I'll tell you what I said, and you still confirm every plan
+yourself. Say "yes, handle it" or tell me what to change.
+```
+
+Only "yes, handle it" (or the student's own words saying the same) counts. Save their rules (budget cap, distance,
+indoor or outdoor, anything they say about vibe) to Cubbie memory. **Those rules never leave the phone.** Also offer a
+scheduled check-in twice a day (suggest 9 am and 6 pm, let them choose) that runs `--poll`, because the other agent can
+only be heard when you ask the server. Without permission, show the student the offer and the link and ask them instead.
+
+**Proposing.** When a poll shows a new match and nothing has been offered:
+
+1. `python3 scripts/bus.py --activity <candidate_id>` prints `proposal_version`, the `window`, the `shared_tags` and
+   any current offer. Only a shared tag can be proposed.
+2. Use your web search to find two or three real options for one shared tag, inside that window, near the student's
+   school and inside their rules. Open the page and check it is real and the time works. Use only a link you actually
+   found; never write one from memory.
+3. Pick the best one and send it:
+   `python3 scripts/bus.py --propose-activity <candidate_id> --version <proposal_version> --tag climbing --url <https link>`
+4. Tell the student in one line, with the link on its own line. What leaves the phone is the tag and the link and
+   nothing else: no title, no place name, no price, no name.
+
+**Answering.** A poll line like `AGENT activity_offer candidate=12 offer=5 round=1/3 version=1 tag=climbing ...` is
+followed by `AGENT link https://...`. Open the link yourself and check it against the student's rules, then do exactly
+one of these:
+
+- Fits: `python3 scripts/bus.py --respond-activity <candidate_id> --offer <offer> --accept`
+- Close, but another shared interest fits better: search for one, then
+  `... --respond-activity <candidate_id> --offer <offer> --counter --tag coffee --url <https link> --reason too_expensive`
+- Nothing fits: `... --respond-activity <candidate_id> --offer <offer> --pass --reason too_far`
+
+The reason is always one of `too_expensive`, `too_far`, `not_my_vibe`, `wrong_time`. It is a code, not a sentence, so
+you never explain, never name an amount, and never mention the calendar. Tell the student in one line what you said.
+If their rules do not cover the case, ask them with the link and wait.
+
+An `AGENT activity_response` line means the other agent passed; you may propose one other option, or stop. There are
+at most 3 rounds in total. Do not argue past that.
+
+**When the agents agree.** The server then sends each student a plain message beginning "You and ... landed on ...",
+followed by the card link and the activity link. Text it word for word. It is not a plan yet: each student still
+confirms their own side on the card, and only the `match` message means it is on. If the rounds run out, the server
+sends "No activity worked out ..."; pass that on and say the time can still be confirmed.
+
+**Never** confirm, decline, block or revoke for the student, send anything about their calendar, budget amount,
+health or location, or answer a way that breaks a rule they gave you.
 
 ## Taking it back
 
@@ -188,6 +245,10 @@ Failure cases, one line each:
 
 - Not paired: "we're not linked to the matcher yet — want me to send you the link?"
 - No matches: "nothing yet. I'll text you the moment someone's free time overlaps yours."
+- No good option found for a match: "I couldn't find a good option for that evening. You can still confirm the time and
+  pick something together." Do not send a made-up link.
+- The other agent has not answered: "their agent hasn't replied yet. I'll check again at your next check-in." Never
+  promise it is instant.
 - Calendar not connected: "I can't see your calendar yet. Connect it and I'll find your free evenings — or tell me
   which evenings are free."
 - Canvas not connected: skip the deadline pass and say so once: "I can't see Canvas, so I'm assuming those evenings

@@ -361,5 +361,11 @@ prevention, E2E email, moderation UI. Deferred items stay absent from code, not 
   account deletion; blocks 12 months; backups-age caveat goes in docs verbatim as: "Deleted rows persist in
   encrypted backups until they expire, within 14 days."
 - 18+ is self-attestation, not age verification.
+- Activity offers (Track 2): an offer is a tag from the closed vocabulary plus an https link and nothing else; the link is
+  the only free-form string the server accepts and it is validated, never fetched. Reason codes are a closed list of
+  four. The demo's agents are scripted stand-ins: in production the choosing is done by each student's Cubbie following
+  `social-match/SKILL.md`, and the server cannot verify that an agent applied its student's rules.
+- Agents agreeing on an activity is NOT the plan being on: each student still confirms their own side, and wording must
+  never say "it's on" or "you're on" before both have.
 - The server accepts allowlisted payloads AND REJECTS everything else with 422; we do NOT claim trusted Skill code
   cannot send data elsewhere.

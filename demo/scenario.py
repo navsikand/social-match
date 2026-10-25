@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""demo/scenario.py — CONTRACT §14, twelve scripted beats, assertable AND watchable.
+"""demo/scenario.py — CONTRACT §14, thirteen scripted beats, assertable AND watchable.
 
 Run it:
 
@@ -13,7 +13,8 @@ The only direct sqlite access is a READ-ONLY probe for facts no endpoint exposes
 ``superseded_by``, the presence of ``reports``/``blocks`` rows); in ``--live`` mode that probe is
 unavailable and the demo prints NOT VERIFIABLE instead of pretending.
 
-The twelve beats mirror §14, with the landed facts where they supersede the §14 draft:
+Beats 1-12 mirror §14, with the landed facts where they supersede the §14 draft (beat 13 is the
+Track 2 addition: two agents settle what to do):
 
 * error bodies are FLAT ``{"error", "detail"}`` app-wide (§2 + app.py flattener);
 * a re-swipe after a revoke hits a VOIDED candidate → ``404 {"error": "not_found"}``
@@ -189,7 +190,8 @@ class Demo:
         self.run_id = secrets.token_hex(3)
         self.reg_code = os.environ.get("REGISTRATION_CODE", "cubbie2026")
         self.u: dict[str, dict] = {}
-        self.counters = {"windows": 0, "tags": 0, "acks": 0, "states": 0}
+        self.counters = {"windows": 0, "tags": 0, "acks": 0, "states": 0, "offers": 0, "answers": 0}
+        self.wire: list[dict] = []  # every agent-negotiation body we POST, so beat 13 can audit it
         self._anon = None
         self.cid = 0
         self.card_body: dict = {}
@@ -364,8 +366,32 @@ class Demo:
             },
         )
 
+    def propose(self, key: str, candidate_id: int, version: int, tag: str, url: str):
+        body = {"candidate_id": candidate_id, "proposal_version": version,
+                "activity_tag": tag, "activity_url": url}
+        self.wire.append(body)
+        r = self.client(key).post("/api/agent/activity/propose", json=body, headers=self.bearer(key))
+        if r.status_code == 201:
+            self.counters["offers"] += 1
+        return r
 
-# --------------------------------------------------------------------------- the twelve beats
+    def respond(self, key: str, candidate_id: int, offer_id: int, response: str, **extra):
+        body = {"candidate_id": candidate_id, "offer_id": offer_id, "response": response, **extra}
+        self.wire.append(body)
+        r = self.client(key).post("/api/agent/activity/respond", json=body, headers=self.bearer(key))
+        if r.status_code == 200:
+            self.counters["answers"] += 1
+            if response == "counter":
+                self.counters["offers"] += 1
+        return r
+
+    def agent_status(self, key: str, candidate_id: int) -> dict:
+        r = self.client(key).get(f"/api/agent/activity/{candidate_id}", headers=self.bearer(key))
+        check(r.status_code == 200, f"GET /api/agent/activity ({self.name(key)}) → {r.status_code} {r.text}")
+        return r.json()
+
+
+# --------------------------------------------------------------------------- the beats
 
 
 def beat_1_register(d: Demo) -> None:
@@ -846,6 +872,120 @@ def beat_12_payload(d: Demo) -> None:
     )
 
 
+# ---- beat 13: Track 2 — two agents settle WHAT to do ----------------------------------------------
+#
+# The two "agents" below are scripted stand-ins. In production each is a student's Cubbie following
+# skill/SKILL.md Step 6: it runs a web search for options and applies the student's private rules.
+# What this beat proves is the SERVER side of that conversation: what is allowed to cross, the
+# round structure, and that the students are only asked once the agents agree.
+
+GYM_URL = "https://www.rockgym.example.com/saturday-open-climb"
+CAFE_URL = "https://www.beanhouse.example.com/study-nights"
+
+
+class StandInAgent:
+    """Private rules live ONLY here. They are never put in a request body."""
+
+    def __init__(self, name: str, budget_cap: int | None):
+        self.name, self.budget_cap = name, budget_cap
+
+    def judge(self, tag: str, url: str, price_found: int) -> tuple[str, str | None]:
+        """What this agent would say to an offer whose page it opened. price_found stays local."""
+        if self.budget_cap is not None and price_found > self.budget_cap:
+            return "counter", "too_expensive"
+        return "accept", None
+
+
+def beat_13_activity(d: Demo) -> None:
+    d.register("kai", "Kai", 2)
+    d.register("lena", "Lena", 5)
+    for key in ("kai", "lena"):
+        d.pair(key)
+    sat = window(SAT, 14, 17)
+    for key in ("kai", "lena"):
+        d.post_state_ok(key, windows=[sat], tags=["climbing", "coffee"], source="student", tier="card+name")
+    cid = int(d.dashboard("kai")[0]["candidate_id"])
+
+    status = d.agent_status("lena", cid)
+    check(status["shared_tags"] == ["climbing", "coffee"], f"shared tags: {status}")
+    check(status["activity"] is None, f"nothing offered yet: {status}")
+    version = status["proposal_version"]
+    d.say(f"  match {cid}: shared interests {status['shared_tags']}, window {status['window']}, no activity yet")
+
+    kai = StandInAgent("Kai's agent", budget_cap=10)      # private: a $10 budget
+    lena = StandInAgent("Lena's agent", budget_cap=None)  # private: no limit
+    d.say(f"  private rules, never sent: {kai.name} has a budget cap, {lena.name} has none")
+
+    # Lena's agent "searches", finds a climbing gym, and offers it. Only a tag and a link go out.
+    r = d.propose("lena", cid, version, "climbing", GYM_URL)
+    check(r.status_code == 201, f"Lena's agent proposes → {r.status_code} {r.text}")
+    o1 = r.json()["offer_id"]
+    d.say(f"  Lena's agent offers climbing + a link → 201 round 1 of {r.json()['max_rounds']}")
+
+    # Until the agents agree, neither student can confirm.
+    r = d.swipe("kai", cid, version, "right")
+    check(r.status_code == 409 and r.json().get("error") == "activity_pending", f"swipe while pending: {r.status_code} {r.text}")
+    d.say("  Kai tries to confirm early → 409 activity_pending (the agents are still talking)")
+
+    # Kai's agent finds the page costs more than its student's rules allow -> counter with a CODE.
+    offer = [i for i in d.inbox("kai") if i["kind"] == "activity_offer"]
+    check(len(offer) == 1 and offer[0]["payload"]["audience"] == "agent", f"Kai's agent should see one agent-facing offer: {offer}")
+    check("message" not in offer[0]["payload"], "agent offers carry no student-facing message")
+    verdict, reason = kai.judge("climbing", GYM_URL, price_found=18)
+    check((verdict, reason) == ("counter", "too_expensive"), f"stand-in verdict: {(verdict, reason)}")
+    r = d.respond("kai", cid, o1, "counter", reason=reason, activity_tag="coffee", activity_url=CAFE_URL)
+    check(r.status_code == 200 and r.json()["round"] == 2, f"Kai's agent counters → {r.status_code} {r.text}")
+    o2 = r.json()["offer_id"]
+    d.say("  Kai's agent counters: coffee + a link, reason code 'too_expensive' (no amount, no sentence) → round 2")
+
+    back = [i for i in d.inbox("lena") if i["kind"] == "activity_offer"]
+    check(back and back[-1]["payload"]["counter_of"] == o1 and back[-1]["payload"]["reason"] == "too_expensive",
+          f"Lena's agent should see the counter and the code: {back}")
+    verdict, _ = lena.judge("coffee", CAFE_URL, price_found=5)
+    check(verdict == "accept", "Lena's agent has no limit, so it accepts")
+    r = d.respond("lena", cid, o2, "accept")
+    check(r.status_code == 200 and r.json()["state"] == "accepted", f"Lena's agent accepts → {r.status_code} {r.text}")
+    d.say("  Lena's agent accepts the coffee counter")
+
+    # NOW the students are asked, in plain words, and the plan is still not 'on'.
+    asked: dict[str, str] = {}
+    for key in ("kai", "lena"):
+        texts = [i["payload"] for i in d.inbox(key) if i["kind"] == "activity_agreed"]
+        check(len(texts) == 1, f"{d.name(key)} should get one agreement text, got {texts}")
+        msg = asked[key] = texts[0]["message"]
+        check("landed on coffee" in msg and "Confirm your side" in msg, f"agreement wording: {msg}")
+        check("it's on" not in msg.lower() and "you're on" not in msg.lower(), f"premature 'on': {msg}")
+    d.say(f"  Kai is asked: {asked['kai']}", f"  Lena is asked: {asked['lena']}")
+
+    card = d.card("kai", cid).json()
+    check(card["activity"]["state"] == "accepted" and card["activity"]["tag"] == "coffee", f"card activity: {card['activity']}")
+    r = d.swipe("kai", cid, version, "right")
+    check(r.status_code == 200, f"Kai confirms his side → {r.status_code} {r.text}")
+    r = d.swipe("lena", cid, version, "right")
+    check(r.status_code == 200, f"Lena confirms her side → {r.status_code} {r.text}")
+    final = [i["payload"] for i in d.inbox("kai") if i["kind"] == "match"]
+    check(final and "Plan: coffee." in final[-1]["message"], f"match text should carry the plan: {final}")
+    d.say(f"  both students confirm -> {final[-1]['message']}")
+
+    # Audit everything the agents put on the wire in this beat.
+    allowed = {"candidate_id", "proposal_version", "activity_tag", "activity_url", "offer_id", "response", "reason"}
+    for body in d.wire:
+        check(set(body) <= allowed, f"unexpected field on the wire: {sorted(set(body) - allowed)}")
+        blob = json.dumps(body).lower()
+        check("budget" not in blob and "$" not in blob and "price" not in blob,
+              f"a private rule or price leaked into a body: {blob}")
+    d.say(f"  audit: {len(d.wire)} agent messages, only tags, https links, ids and reason codes; no budget, no price")
+
+    # Over-sharing is refused by the server, not by good manners.
+    r = d.propose("kai", cid, version, "coffee", "http://not-https.example.com")
+    check(r.status_code in (409, 422), f"plain-http link should be refused: {r.status_code}")
+    r = d.client("kai").post("/api/agent/activity/propose", headers=d.bearer("kai"), json={
+        "candidate_id": cid, "proposal_version": version, "activity_tag": "coffee", "activity_url": CAFE_URL,
+        "title": "Therapy - Dr. Ruiz"})
+    check(r.status_code == 422 and r.json().get("error") == "payload_forbidden", f"extra field: {r.status_code} {r.text}")
+    d.say("  an offer with a title field, or a plain-http link -> refused (422 payload_forbidden)")
+
+
 BEATS = [
     (1, "register", beat_1_register),
     (2, "pairing", beat_2_pair),
@@ -859,6 +999,7 @@ BEATS = [
     (10, "counter", beat_10_counter),
     (11, "no-overlap/block/report", beat_11_no_overlap_block_report),
     (12, "payload/therapy", beat_12_payload),
+    (13, "agents settle an activity", beat_13_activity),
 ]
 
 
@@ -922,6 +1063,10 @@ def print_summary(demo: Demo, results: list[dict]) -> None:
     print(
         "  identity:    1 display name shown where `card+name` is live (Ava → Ben);"
         " 1 pseudonym (tag-<4hex>) where only `card` is live (Ben → Ava)"
+    )
+    print(
+        f"  negotiation: {demo.counters['offers']} offers (a tag + an https link), {demo.counters['answers']} answers"
+        " (accept | counter | pass + a reason code); budgets, prices, venue names: never sent"
     )
     print(
         "  rejected:    calendar titles (e.g. 'Therapy - Dr. Ruiz'), class names, grades, photos"

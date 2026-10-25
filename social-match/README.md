@@ -26,7 +26,7 @@ packages, no `uv`.
 
 ## Run it by hand
 
-From this folder (the repo's `skill/`):
+From this folder (the repo's `social-match/`):
 
 ```bash
 python3 scripts/bus.py --selftest && python3 scripts/pair.py --selftest   # offline, no network
@@ -65,7 +65,7 @@ and none should be added.
 
 ## Installing
 
-The folder is `skill/` in this repository. On publish, name the folder after the skill (`social-match/`) and point
+The folder is `social-match/` in this repository, named after the skill, so you can point
 Cubbie at it; Cubbie lists a Skill by the `name` in `SKILL.md` either way.
 
 ## Testing done for this package

@@ -16,6 +16,12 @@
   <p class="window"><strong id="window-display"></strong></p>
   <p id="window-utc" class="muted small"></p>
 
+  <section id="activity" class="notice info" hidden>
+    <p><strong id="activity-title"></strong></p>
+    <p id="activity-link-line" class="small"></p>
+    <p id="activity-note" class="muted small"></p>
+  </section>
+
   <div id="reasons" class="reasons"></div>
   <div id="tags" class="tags"></div>
 
@@ -74,6 +80,9 @@
   };
 
   function fail(res, data) {
+    if (data && data.error === "activity_pending") {
+      return "Your agents are still settling what to do. Check back in a bit.";
+    }
     if (errors[res.status]) return errors[res.status];
     return apiError(res, data);
   }
@@ -103,6 +112,8 @@
       for (const opt of tz.options) if (opt.value === w.tz) tz.value = w.tz;
     }
 
+    renderActivity(data.activity);
+
     const reasons = data.reasons || {};
     const parts = [];
     if (reasons.shared_tags && reasons.shared_tags.length) {
@@ -128,6 +139,42 @@
     }
     statusEl.hidden = true;
     cardEl.hidden = false;
+  }
+
+  // Option B: the activity is a tag + a link, nothing else. Everything goes in via textContent,
+  // and the link is only made clickable when it is a plain https URL.
+  function renderActivity(a) {
+    const box = document.getElementById("activity");
+    if (!a) { box.hidden = true; return; }
+    const what = String(a.tag || "").replace(/_/g, " ");
+    const title = document.getElementById("activity-title");
+    const line = document.getElementById("activity-link-line");
+    const note = document.getElementById("activity-note");
+    line.textContent = "";
+    note.textContent = "";
+    const who = a.proposed_by_you ? "Your agent suggested" : "Their agent suggested";
+    if (a.state === "accepted") {
+      title.textContent = "Your agents agreed on: " + what;
+    } else if (a.state === "offered") {
+      title.textContent = who + ": " + what;
+      note.textContent = "Round " + a.round + " of " + a.max_rounds +
+        ". You can confirm once your agents agree.";
+    } else if (a.state === "passed") {
+      title.textContent = "No activity agreed (" + what + " was passed on" +
+        (a.reason_text ? ": " + a.reason_text : "") + ")";
+      note.textContent = "You can still confirm the time and pick something yourselves.";
+    } else {
+      title.textContent = "Agents are negotiating: " + what;
+    }
+    if (typeof a.url === "string" && /^https:\/\//.test(a.url)) {
+      const link = document.createElement("a");
+      link.href = a.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer nofollow";
+      link.textContent = "Open link (" + (a.host || "external site") + ")";
+      line.appendChild(link);
+    }
+    box.hidden = false;
   }
 
   async function swipe(direction) {

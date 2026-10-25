@@ -5,6 +5,11 @@ Python standard library only: urllib.request, json, argparse, os, sys.
 
     python3 scripts/bus.py --poll [--since N]   # print new inbox messages, then "NEXT SINCE <seq>"
     python3 scripts/bus.py --send-state FILE    # POST /api/state, print the server's JSON reply
+    python3 scripts/bus.py --activity ID        # show the current activity offer on a match
+    python3 scripts/bus.py --propose-activity ID --version N --tag TAG --url HTTPS_LINK
+    python3 scripts/bus.py --respond-activity ID --offer N --accept
+    python3 scripts/bus.py --respond-activity ID --offer N --pass --reason CODE
+    python3 scripts/bus.py --respond-activity ID --offer N --counter --tag TAG --url HTTPS_LINK [--reason CODE]
     python3 scripts/bus.py --revoke [ID]        # web-session-only: prints what to do, exits 2
     python3 scripts/bus.py --whoami             # print this agent's stored identity (exit 0 when paired)
     python3 scripts/bus.py --selftest           # offline argument/payload checks
@@ -48,6 +53,9 @@ PUBLICATION_KEYS = {"tier"}
 MAX_WINDOWS = 20
 MAX_TAGS = 8
 MAX_TAG_CHARS = 32
+# Activity negotiation: an offer is a tag + an https link, nothing else. Reasons are a closed list.
+REASONS = ["too_expensive", "too_far", "not_my_vibe", "wrong_time"]
+MAX_URL_LEN = 300
 
 
 # ---------------------------------------------------------------- config
@@ -284,17 +292,47 @@ def load_payload(path):
 
 
 def poll_lines(items):
-    """One line per item: payload.message, then card_url when present. Blank messages are skipped."""
+    """Lines for the model to read. Student-facing items print `message`, then the card link, then any
+    activity link, each on its own line. Agent-facing items (payload.audience == "agent") are NOT for
+    the student: they print one machine line starting with AGENT, and the link on the next line.
+    Items without an audience are student-facing, as before."""
     lines = []
     for item in items:
         payload = item.get("payload") or {}
+        if payload.get("audience") == "agent":
+            lines.extend(agent_lines(payload))
+            continue
         message = payload.get("message")
         if message:
             lines.append(str(message))
         card_url = payload.get("card_url")
         if card_url:
             lines.append(str(card_url))
+        activity_url = payload.get("activity_url")
+        if activity_url and (not message or str(activity_url) not in str(message)):
+            lines.append(str(activity_url))
     return lines
+
+
+def agent_lines(payload):
+    kind = payload.get("kind")
+    if kind == "activity_offer":
+        head = (
+            f"AGENT activity_offer candidate={payload.get('candidate_id')} offer={payload.get('offer_id')}"
+            f" round={payload.get('round')}/{payload.get('max_rounds')} version={payload.get('proposal_version')}"
+            f" tag={payload.get('activity_tag')} window={payload.get('window')!r}"
+            f" counter_of={payload.get('counter_of') or '-'} reason={payload.get('reason') or '-'}"
+        )
+        out = [head]
+        if payload.get("activity_url"):
+            out.append(f"AGENT link {payload['activity_url']}")
+        return out
+    if kind == "activity_response":
+        return [
+            f"AGENT activity_response candidate={payload.get('candidate_id')} offer={payload.get('offer_id')}"
+            f" response={payload.get('response')} reason={payload.get('reason') or '-'}"
+        ]
+    return [f"AGENT {kind or 'unknown'}"]
 
 
 def cmd_poll(args):
@@ -313,6 +351,99 @@ def cmd_send_state(args):
     payload = load_payload(args.send_state)
     data = api("POST", "/api/state", payload, token=auth["token"])
     print(json.dumps(data, indent=2, sort_keys=True))
+    return 0
+
+
+def url_problems(url):
+    """Local pre-flight mirroring the server's link rules. The server stays the authority."""
+    if not isinstance(url, str) or not url:
+        return ["the link is empty"]
+    problems = []
+    if len(url) > MAX_URL_LEN:
+        problems.append(f"the link is longer than {MAX_URL_LEN} characters")
+    if not url.isascii() or any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in url):
+        problems.append("the link must be plain ASCII with no spaces")
+    if not url.startswith("https://"):
+        problems.append("the link must start with https://")
+    rest = url[len("https://"):].split("/", 1)[0].split("?", 1)[0]
+    if "@" in rest:
+        problems.append("the link must not contain a username or password")
+    if "#" in url:
+        problems.append("the link must not contain a #fragment")
+    return problems
+
+
+def activity_problems(tag, url, reason=None, need_link=True):
+    problems = []
+    if need_link:
+        if tag not in TAG_VOCAB:
+            problems.append(f"tag {tag!r} is not in TAG_VOCAB (the closed interest list)")
+        problems.extend(url_problems(url))
+    if reason is not None and reason not in REASONS:
+        problems.append(f"reason must be one of {', '.join(REASONS)}")
+    return problems
+
+
+def fail_usage(problems):
+    for problem in problems:
+        print(f"- {problem}", file=sys.stderr)
+    return 2
+
+
+def cmd_activity(args):
+    auth = require_auth(args.data_dir)
+    data = api("GET", f"/api/agent/activity/{int(args.activity)}", token=auth["token"])
+    print(json.dumps(data, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_propose_activity(args):
+    if args.version is None or not args.tag or not args.url:
+        print("--propose-activity needs --version, --tag and --url", file=sys.stderr)
+        return 2
+    problems = activity_problems(args.tag, args.url)
+    if problems:
+        return fail_usage(problems)
+    auth = require_auth(args.data_dir)
+    body = {"candidate_id": int(args.propose_activity), "proposal_version": args.version,
+            "activity_tag": args.tag, "activity_url": args.url}
+    print(json.dumps(api("POST", "/api/agent/activity/propose", body, token=auth["token"]), indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_respond_activity(args):
+    if args.offer is None:
+        print("--respond-activity needs --offer", file=sys.stderr)
+        return 2
+    chosen = [name for name, on in (("accept", args.accept), ("pass", args.pass_), ("counter", args.counter)) if on]
+    if len(chosen) != 1:
+        print("choose exactly one of --accept, --pass, --counter", file=sys.stderr)
+        return 2
+    response = chosen[0]
+    body = {"candidate_id": int(args.respond_activity), "offer_id": args.offer, "response": response}
+    problems = []
+    if response == "accept":
+        if args.reason or args.tag or args.url:
+            problems.append("--accept carries no reason, tag or link")
+    elif response == "pass":
+        if not args.reason:
+            problems.append("--pass needs --reason")
+        if args.tag or args.url:
+            problems.append("--pass carries no tag or link; use --counter to suggest something else")
+        problems.extend(activity_problems(None, None, args.reason, need_link=False))
+        body["reason"] = args.reason
+    else:
+        if not args.tag or not args.url:
+            problems.append("--counter needs --tag and --url")
+        else:
+            problems.extend(activity_problems(args.tag, args.url, args.reason))
+        body["activity_tag"], body["activity_url"] = args.tag, args.url
+        if args.reason:
+            body["reason"] = args.reason
+    if problems:
+        return fail_usage(problems)
+    auth = require_auth(args.data_dir)
+    print(json.dumps(api("POST", "/api/agent/activity/respond", body, token=auth["token"]), indent=2, sort_keys=True))
     return 0
 
 
@@ -490,6 +621,38 @@ def selftest(args):
     check(quiet(lambda: cmd_revoke(parser.parse_args(["--revoke", "5"]))) == 2,
           "--revoke tells the student to use the web and exits 2", failures)
 
+    check(url_problems("https://rockgym.example.com/open-climb") == [], "a plain https link passes the local check", failures)
+    for bad, label in (("http://x.example.com", "http"), ("https://u:p@x.example.com", "credentials"),
+                       ("https://x.example.com/a#b", "fragment"), ("https://x.example.com/a b", "space"),
+                       ("https://x.example.com/" + "a" * 300, "overlong")):
+        check(url_problems(bad) != [], f"a {label} link is caught before sending", failures)
+    check(activity_problems("Phoenix Rock Gym", "https://x.example.com/a") != [], "a free-text activity tag is caught", failures)
+    check(activity_problems("climbing", "https://x.example.com/a", reason="broke") != [], "a free-text reason is caught", failures)
+    check(activity_problems("climbing", "https://x.example.com/a", reason="too_far") == [], "a closed-list reason passes", failures)
+
+    offer_item = {"seq": 9, "kind": "activity_offer", "payload": {
+        "kind": "activity_offer", "audience": "agent", "candidate_id": 4, "offer_id": 7, "round": 1, "max_rounds": 3,
+        "proposal_version": 1, "activity_tag": "climbing", "activity_url": "https://rockgym.example.com/a",
+        "window": "Thu 19:00-21:00", "counter_of": None, "reason": None}}
+    offer_lines = poll_lines([offer_item])
+    check(len(offer_lines) == 2 and offer_lines[0].startswith("AGENT activity_offer candidate=4 offer=7 round=1/3 version=1")
+          and offer_lines[1] == "AGENT link https://rockgym.example.com/a",
+          "agent-facing offers print as AGENT lines, never as a student message", failures)
+    agreed_item = {"seq": 10, "kind": "activity_agreed", "payload": {
+        "kind": "activity_agreed", "audience": "student", "message": "You and Ben landed on climbing for Thu 19:00-21:00. Confirm your side: http://x/m/4",
+        "card_url": "http://x/m/4", "activity_url": "https://rockgym.example.com/a"}}
+    check(poll_lines([agreed_item])[-2:] == ["http://x/m/4", "https://rockgym.example.com/a"],
+          "a student-facing agreement prints the card link then the activity link", failures)
+
+    parsed = parser.parse_args(["--respond-activity", "4", "--offer", "7", "--pass", "--reason", "too_far"])
+    check(parsed.respond_activity == "4" and parsed.pass_ and parsed.offer == 7 and parsed.reason == "too_far",
+          "--respond-activity --pass --reason parses", failures)
+    check(quiet(lambda: cmd_respond_activity(parser.parse_args(["--respond-activity", "4", "--offer", "7", "--pass"]))) == 2,
+          "--pass without a reason is a usage error", failures)
+    check(quiet(lambda: cmd_propose_activity(parser.parse_args(
+        ["--propose-activity", "4", "--version", "1", "--tag", "climbing", "--url", "http://x.example.com"]))) == 2,
+          "--propose-activity with an http link is a usage error", failures)
+
     if failures:
         print(f"\n{len(failures)} check(s) failed", file=sys.stderr)
         return 1
@@ -514,8 +677,19 @@ def build_parser():
     actions.add_argument("--revoke", metavar="ID", nargs="?", const="", default=None,
                          help="web-session-only: prints what the student should do and exits 2")
     actions.add_argument("--whoami", action="store_true", help="print the stored identity (exit 0 when paired)")
+    actions.add_argument("--activity", metavar="ID", help="show the current activity offer on candidate ID")
+    actions.add_argument("--propose-activity", metavar="ID", help="propose an activity for candidate ID")
+    actions.add_argument("--respond-activity", metavar="ID", help="answer the current activity offer on candidate ID")
     actions.add_argument("--selftest", action="store_true", help="run offline checks and exit 0/1")
     parser.add_argument("--since", type=int, default=0, help="with --poll: last seq already seen (default 0)")
+    parser.add_argument("--version", type=int, default=None, help="with --propose-activity: the proposal_version from the card")
+    parser.add_argument("--offer", type=int, default=None, help="with --respond-activity: the offer id from the AGENT line")
+    parser.add_argument("--accept", action="store_true", help="with --respond-activity: accept the offer")
+    parser.add_argument("--pass", dest="pass_", action="store_true", help="with --respond-activity: pass, needs --reason")
+    parser.add_argument("--counter", action="store_true", help="with --respond-activity: suggest another activity")
+    parser.add_argument("--tag", default=None, help="activity tag from the closed interest list")
+    parser.add_argument("--url", default=None, help="https link to the activity")
+    parser.add_argument("--reason", default=None, help=f"one of: {', '.join(REASONS)}")
     return parser
 
 
@@ -534,6 +708,12 @@ def main(argv=None):
         return cmd_revoke(args)
     if args.whoami:
         return cmd_whoami(args)
+    if args.activity is not None:
+        return cmd_activity(args)
+    if args.propose_activity is not None:
+        return cmd_propose_activity(args)
+    if args.respond_activity is not None:
+        return cmd_respond_activity(args)
     return 2
 
 
