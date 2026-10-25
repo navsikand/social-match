@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from server import config, db, photo_api, sessions, wording
+from server import config, db, offers, photo_api, sessions, wording
 
 router = APIRouter(prefix="/api", tags=["scheduling"])
 
@@ -316,6 +316,7 @@ def card(conn, uid: int, candidate_id: int) -> dict:
         "reasons": _loads(cand["reasons_json"]),
         "card_url": wording.card_url(cand["id"]),
         "state": cand["state"],
+        "activity": offers.card_view(conn, uid, prop["id"]),
     }
 
 
@@ -380,6 +381,12 @@ def confirm(conn, uid: int, candidate_id: int, proposal_version: int) -> dict:
         if prop["version"] != proposal_version:
             raise SchedulingError(409, "stale_version", "this card changed — reload it")
 
+        # (5b) Track 2: while the agents are still settling WHAT to do, no student can confirm.
+        # A passed/exhausted negotiation falls back to the time-only plan; no offers = legacy flow.
+        pending = offers.latest_offer(conn, prop["id"])
+        if pending is not None and pending["state"] == "offered":
+            raise SchedulingError(409, "activity_pending", "your agents are still settling what to do")
+
         # (6) both availabilities live and still covering the whole proposal window (read-time).
         if availability_live(conn, cand["user_a"], now) is None or availability_live(
             conn, cand["user_b"], now
@@ -434,8 +441,14 @@ def confirm(conn, uid: int, candidate_id: int, proposal_version: int) -> dict:
             )
             conn.execute("UPDATE candidates SET state='matched' WHERE id=?", (cand["id"],))
             # `about` is the OTHER user per recipient (§9).
-            _push(conn, uid, wording.match_text(conn, other, start, end, tz))
-            _push(conn, other, wording.match_text(conn, uid, start, end, tz))
+            agreed = offers.accepted_offer(conn, prop["id"])
+            for me, them in ((uid, other), (other, uid)):
+                text = wording.match_text(conn, them, start, end, tz)
+                if agreed is not None:
+                    text["message"] += f" Plan: {offers.human_tag(agreed['activity_tag'])}."
+                    text["activity_tag"] = agreed["activity_tag"]
+                    text["activity_url"] = agreed["activity_url"]
+                _push(conn, me, text)
 
         state = db.one(conn, "SELECT state FROM proposals WHERE id=?", (prop["id"],))["state"]
         return {"state": state, "proposal_id": prop["id"], "proposal_version": prop["version"]}
@@ -684,6 +697,7 @@ def delete_account(conn, uid: int) -> dict:
             conn.execute(
                 "UPDATE candidates SET state='voided', closed_at=? WHERE id=?", (now, cand["id"])
             )
+        conn.execute("DELETE FROM activity_offers WHERE proposer_id=? OR responder_id=?", (uid, uid))
         conn.execute("DELETE FROM inbox_items WHERE user_id=?", (uid,))
         conn.execute(
             "UPDATE consent_log SET detail_json='{}', purge_after=? WHERE user_id_hash=?",

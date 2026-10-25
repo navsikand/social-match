@@ -168,3 +168,26 @@ CREATE TABLE IF NOT EXISTS inbox_items (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_inbox_user ON inbox_items(user_id, seq);
+
+-- Agent-to-agent activity negotiation (Track 2). One row per offer; a counter closes the
+-- old offer and opens the next round. Option B: an offer carries ONLY a tag from the closed
+-- vocabulary and an https link -- no free-text title or place name.
+CREATE TABLE IF NOT EXISTS activity_offers (
+  id INTEGER PRIMARY KEY,
+  candidate_id INTEGER NOT NULL,
+  proposal_id INTEGER NOT NULL,
+  round INTEGER NOT NULL,
+  proposer_id INTEGER NOT NULL,
+  activity_tag TEXT NOT NULL,
+  activity_url TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'offered'
+    CHECK (state IN ('offered','accepted','countered','passed')),
+  reason TEXT CHECK (reason IS NULL OR reason IN ('too_expensive','too_far','not_my_vibe','wrong_time')),
+  responder_id INTEGER,
+  created_at TEXT NOT NULL,
+  responded_at TEXT,
+  UNIQUE (proposal_id, round),
+  FOREIGN KEY (candidate_id) REFERENCES candidates(id) ON DELETE CASCADE,
+  FOREIGN KEY (proposal_id) REFERENCES proposals(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_offers_proposal ON activity_offers(proposal_id, round);

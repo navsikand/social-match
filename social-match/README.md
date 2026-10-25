@@ -26,7 +26,7 @@ packages, no `uv`.
 
 ## Run it by hand
 
-From this folder (the repo's `skill/`):
+From this folder (the repo's `social-match/`):
 
 ```bash
 python3 scripts/bus.py --selftest && python3 scripts/pair.py --selftest   # offline, no network
@@ -53,8 +53,8 @@ and none should be added.
   The kit documents no schema for `cubbie.yaml` anywhere — `schemas.md` covers `evals.json`, `history.json`,
   `grading.json`, `metrics.json`, `timing.json`, `benchmark.json`, `comparison.json` and `analysis.json`, not
   manifests — and `cubbie-capabilities.md` and `cubbie-auth.md` say nothing about one either.
-- **No `cubbie.yaml` ships** (removed after the final review): the kit's own structure check warns it is "not
-  needed, ignored", and nothing ever depended on it. `SKILL.md` is the source of truth — a Skill is the folder.
+- `cubbie.yaml` ships as self-documentation and **Cubbie ignores it** (the kit's structure check warns exactly
+  that). `SKILL.md` is the source of truth — a Skill is the folder.
 - Sign-in is approach 4 in `cubbie-auth.md` (CLI login with a link), expressed as two steps because the server's
   pairing flow is start-then-approve: `pair.py --start` prints the link, `pair.py --finish CODE` saves the pairing.
   There is no key to paste and nothing that belongs in the chat.
@@ -65,7 +65,7 @@ and none should be added.
 
 ## Installing
 
-The folder is `skill/` in this repository. On publish, name the folder after the skill (`social-match/`) and point
+The folder is `social-match/` in this repository, named after the skill, so you can point
 Cubbie at it; Cubbie lists a Skill by the `name` in `SKILL.md` either way.
 
 ## Testing done for this package

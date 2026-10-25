@@ -1,10 +1,20 @@
 {% extends "base.html" %}
 {% block title %}Register — Social Match{% endblock %}
+{% block body_class %}auth-page{% endblock %}
 {% block content %}
-<section class="card narrow">
-  <h1>Create your account</h1>
-  <p class="muted">Your card is only shown to people you are matched with, under the sharing rules you choose.</p>
-
+<div class="auth">
+  <aside class="auth-side">
+    <span class="auth-name">Social Match</span>
+    <div class="auth-pitch">
+      {% include "_logo.html" %}
+      <h2>Your card is only shown to people you match with.</h2>
+      <p>You choose the sharing rules.</p>
+    </div>
+    <span class="auth-fine">You can withdraw from any match.</span>
+  </aside>
+  <section class="auth-main">
+    <div class="auth-form">
+      <h1>Create your account</h1>
   <form id="register-form" class="stack" novalidate>
     <label>Email
       <input type="email" name="email" id="email" autocomplete="email" required>
@@ -31,7 +41,9 @@
     <p id="register-status" class="notice" hidden></p>
   </form>
   <p class="muted">Already registered? <a href="/login">Sign in</a>.</p>
-</section>
+    </div>
+  </section>
+</div>
 {% endblock %}
 {% block scripts %}
 <script>

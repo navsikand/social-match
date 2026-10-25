@@ -1,4 +1,4 @@
-Study Match — privacy policy
+Social Match — privacy policy
 
 This is a hackathon demo server. It runs on a teammate's laptop, it stores data for a class project, and it is not run
 by a company. It has no age verification and no identity verification: signing up means you ticked a box saying you are
@@ -25,6 +25,10 @@ Only these things, and only because matching does not work without them:
 - Wants: zero to two words from `hangout` and `event` — whether you would rather meet up or go to an
   event. Nothing else fits the field, so nothing else can be written into it.
 - Consent log: one row per grant, publication or withdrawal, recording the action, its scope and when it happened.
+- Activity offers: when your agent and another student's agent settle what to do, we store each offer: an interest
+  tag from the same closed vocabulary, an https link, the round number, which side offered it, and the answer (accept,
+  counter, or pass with one of four reason codes: too expensive, too far, not their vibe, the wrong time). There is no
+  title, no place name, no price and no sentence in an offer or an answer.
 - Inbox messages: the notifications we compose for you (a new card, a counter-offer, a confirmation, a revocation).
 - A pairing record for each device your Cubbie agent runs on, so the agent can authenticate. The token is stored hashed.
 
@@ -36,8 +40,10 @@ field for them and the validator refuses unknown fields at every level of the pa
 - calendar event titles, attendees, or locations;
 - course codes, course names, professor names, or assignment names;
 - grades, of any kind, anywhere;
-- free text of any description — with one bounded exception: interests (the tags above), which are capped at 32
-  characters each and at most eight of them, and are canonicalised before they are used for anything.
+- free text of any description, with two bounded exceptions. Interests (the tags above) are capped at 32 characters each
+  and at most eight of them, and are canonicalised before they are used for anything. The other is the https link on an
+  activity offer: we check it (https only, plain ASCII, at most 300 characters, a real domain name, no password in it,
+  no #fragment, no IP address), the server never opens it, and anyone following it is leaving this server.
 
 That is the point of the design: your Cubbie agent reads your calendar on your phone, turns it into time ranges plus
 tags, and deletes the rest. What reaches this server is a handful of intervals and a few words from a closed list.
@@ -75,7 +81,7 @@ HOW LONG WE KEEP IT
 There is one rule per kind of data, and the server enforces each one:
 
 - Availability expires 7 days after it was observed. Expired availability is never read, even before it is deleted.
-- Closed matches, swipes and match reasons are kept 30 days.
+- Closed matches, swipes and match reasons are kept 30 days, and the activity offers made on a match go with it.
 - The consent log is kept while your account exists. When you delete your account it is stripped down to a pseudonymous
   id (a salted hash, not your account id or email), the action, its scope, and the timestamp — the detail payload is
   blanked to `{}` — and it is purged after 90 days.
@@ -97,8 +103,8 @@ YOUR RIGHTS, AS BUTTONS
   being served the moment you press it.
 - "Delete my account" runs the whole cascade in one transaction. Your account row is stripped (email, display name and
   password hash blanked, `deleted_at` set, so the session dies). Your availability and its windows, your wants, your hobby tags,
-  your swipes, your inbox items and the confirmations on your proposals are deleted. Your photo is deleted and the
-  stored image file unlinked. Your grants are withdrawn, your
+  your swipes, the activity offers you made or answered, your inbox items and the confirmations on your proposals are
+  deleted. Your photo is deleted and the stored image file unlinked. Your grants are withdrawn, your
   pairing records are revoked, and your candidates and live proposals are voided — so the other side's card or plan
   stops being served, without being told why. What survives is deliberately narrow: your block hashes (salted, so a
   block keeps working), the report rows (a report is not erased by deleting the reporter), and the stripped consent rows

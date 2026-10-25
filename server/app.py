@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from server import db, sweep
-from server import inbox, pairing, photo_api, scheduling, state
+from server import activity, inbox, pairing, photo_api, scheduling, state
 from server.webui import router as webui
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webui", "static")
@@ -30,6 +30,7 @@ app = FastAPI(title="Social Match", version="0.1.0", lifespan=lifespan)
 app.include_router(pairing.router)
 app.include_router(state.router)
 app.include_router(scheduling.router)
+app.include_router(activity.router)
 app.include_router(inbox.router)
 app.include_router(photo_api.router)
 app.include_router(webui.router)
