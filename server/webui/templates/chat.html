@@ -213,14 +213,15 @@
   }
 
   // Deferred riders ("also updating: interests") ride along with a preview. The history payload
-  // does not expose `ops` today (F13-core carries sections only), so ops are read when present
-  // and the line is simply absent otherwise — never invented.
+  // Deferred riders ("also updating: interests") ride along with a preview. The server sends
+  // READY-MADE labels (pending.riders from _rider_summaries — server-templated, closed
+  // vocabulary; the raw ops are never exposed), so the client just renders them, deduped.
   function pendingRiders(pending) {
     const out = [];
-    const ops = pending && Array.isArray(pending.ops) ? pending.ops : [];
-    for (let i = 0; i < ops.length; i += 1) {
-      const label = RIDER_OPS[ops[i] && ops[i].op];
-      if (label && out.indexOf(label) === -1) out.push(label);
+    const riders = pending && Array.isArray(pending.riders) ? pending.riders : [];
+    for (let i = 0; i < riders.length; i += 1) {
+      const text = riders[i] && riders[i].summary ? riders[i].summary : null;
+      if (text && out.indexOf(text) === -1) out.push(text);
     }
     return out;
   }
