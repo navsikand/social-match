@@ -12,7 +12,7 @@
 <div class="progress" aria-hidden="true"><span id="progress-fill"></span></div>
 <div class="chrome">
   <span class="mark">Social&nbsp;Match</span>
-  <span class="counter"><b id="slide-now">1</b>/<span id="slide-total">12</span></span>
+  <span class="counter"><b id="slide-now">1</b>/<span id="slide-total">10</span></span>
 </div>
 <div class="hint" id="hint" aria-hidden="true">→ space / arrows · <kbd>F</kbd> fullscreen · <kbd>N</kbd> notes</div>
 
@@ -185,42 +185,6 @@
   </section>
 
   <!-- 9 ────────────────────────────────────────────── -->
-  <section class="slide" data-notes="Three mechanisms that are easy to get wrong and that we test: grant-preserving writes, [DONE] gating, and in-transaction consent re-reads.">
-    <p class="eyebrow">The hard part</p>
-    <h2>Three ways to get this wrong</h2>
-    <div class="wrong">
-      <div>
-        <h3>1 · A chat write must not renew consent</h3>
-        <p>Two write modes. <code>agent</code> keeps legacy grant-renewal. <code>chat</code> is <strong>grant-preserving</strong> and revalidates liveness and state version inside its own transaction.</p>
-      </div>
-      <div>
-        <h3>2 · A truncated reply must not act</h3>
-        <p>Only a clean <code>[DONE]</code> completion may execute actions. A capped or unterminated stream is text, never an instruction.</p>
-      </div>
-      <div>
-        <h3>3 · A revoke must win the race</h3>
-        <p>The delegation grant is re-read inside the same transaction that writes the offer, so withdrawing mid-turn changes the outcome.</p>
-      </div>
-    </div>
-  </section>
-
-  <!-- 10 ───────────────────────────────────────────── -->
-  <section class="slide" data-notes="Rigor as evidence. Three review gates blocked on six defects that our own fixes introduced — including a save path that could have emptied a student's availability. Say that plainly; it is the most credible thing in the deck.">
-    <p class="eyebrow">Rigor</p>
-    <h2>We shipped it through gates, not vibes</h2>
-    <div class="stats">
-      <div class="stat"><b data-count="544">544</b><span>tests</span></div>
-      <div class="stat"><b data-count="17">17</b><span>demo beats</span></div>
-      <div class="stat"><b data-count="38">38</b><span>UX findings</span></div>
-      <div class="stat"><b data-count="3">3</b><span>review gates</span></div>
-    </div>
-    <p class="honest">The gates blocked on <strong>six defects our own fixes introduced</strong> —
-      including a save path that could have emptied a student's availability,
-      and a “Withdraw” button hidden by the patch meant to reveal it.</p>
-    <p class="fine">Every one is closed and pinned by a test that fails if the guard is removed.</p>
-  </section>
-
-  <!-- 11 ───────────────────────────────────────────── -->
   <section class="slide" data-notes="If they only remember one line, this is it: an agent may propose, a human is the only thing that can confirm.">
     <p class="eyebrow">The one line</p>
     <blockquote>
@@ -231,7 +195,7 @@
       is machinery around that sentence.</p>
   </section>
 
-  <!-- 12 ───────────────────────────────────────────── -->
+  <!-- 10 ───────────────────────────────────────────── -->
   <section class="slide slide--end" data-notes="Close on the pun, then the command. Leave the URL up.">
     <p class="eyebrow">Try it</p>
     <h2>Two accounts, sixty seconds</h2>

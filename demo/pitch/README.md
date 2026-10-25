@@ -26,7 +26,7 @@ python3 -m http.server 8000 -d demo/pitch    # → http://localhost:8000
 
 Every slide is deep-linkable: `index.html#7` opens on slide 7, and the URL follows you as you move.
 
-## Order (12 slides)
+## Order (10 slides)
 
 1. Title — the one-liner
 2. The problem — "so when are you free?" (11 messages, 3 days)
@@ -36,10 +36,8 @@ Every slide is deep-linkable: `index.html#7` opens on slide 7, and the URL follo
 6. Consent — five grants, re-read at the moment of use
 7. Privacy — what crosses the wire vs what never does
 8. Conflicting constraints — the budget → ramen counter, reason codes only
-9. The hard part — three ways to get this wrong (and the tests that stop it)
-10. Rigor — 544 tests, 17 beats, 38 UX findings, 3 gates (including six defects we caused and caught)
-11. The one line — an agent may propose; a human confirms
-12. Try it — two accounts, sixty seconds, and the closing pun
+9. The one line — an agent may propose; a human confirms
+10. Try it — two accounts, sixty seconds, and the closing pun
 
 Speaker notes live in each slide's `data-notes` attribute — press `N` to see them while presenting.
 
