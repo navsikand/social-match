@@ -65,10 +65,39 @@ class AIError(Exception):
         super().__init__(f"{code}: {self.detail}")
 
 
+_BEARER_RE = None  # compiled lazily: module import must never touch the network or env secrets
+_TOKEN_RE = None
+
+
+def _redact_secrets(text: str) -> str:
+    """Finding 11: configured credentials and credential-shaped material never survive redaction.
+
+    The order matters: replacement happens BEFORE the control-strip and the length cap, so a
+    secret straddling the 300-char boundary cannot keep half of itself visible.
+    """
+    global _BEARER_RE, _TOKEN_RE
+    import re
+
+    if _BEARER_RE is None:
+        _BEARER_RE = re.compile(r"Bearer\s+[A-Za-z0-9._~+/-]{8,}", re.IGNORECASE)
+        _TOKEN_RE = re.compile(r"\bsk-[A-Za-z0-9]{8,}\b")
+
+    key = config.ai_api_key()
+    if key:
+        text = text.replace(key, "[redacted]")
+    url = config.ai_api_url()
+    if url:
+        text = text.replace(url, "[redacted]")
+    text = _BEARER_RE.sub("Bearer [redacted]", text)
+    text = _TOKEN_RE.sub("[redacted]", text)
+    return text
+
+
 def redact(text: str) -> str:
-    """Display-safe text: control characters dropped (newline/tab kept), capped at 300."""
+    """Display-safe text: secrets replaced, control characters dropped (newline/tab kept), capped at 300."""
     if not isinstance(text, str):
         text = str(text)
+    text = _redact_secrets(text)
     kept: list[str] = []
     for char in text:
         if char in ("\n", "\t"):

@@ -285,6 +285,11 @@ def respond(conn, uid: int, candidate_id: int, offer_id: int, response: str,
         if next_round > offers.MAX_ROUNDS:
             raise SchedulingError(409, "round_limit", "last round: accept or pass")
         tag, url = _validate_values(tag, url)
+        # Finding 2 closure: a counter may carry no reason at all, but whatever arrives must be a
+        # closed-list code — never provider prose pushed into the counterpart's inbox/notes. Chat's
+        # op schema already rejects reason-on-counter; this makes the CORE refuse it too, for any caller.
+        if reason is not None:
+            reason = _validate_reason(reason)
         _check_shared_tag(conn, uid, other, tag)
         conn.execute(
             "UPDATE activity_offers SET state='countered', reason=?, responder_id=?, responded_at=? WHERE id=?",

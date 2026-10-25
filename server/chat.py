@@ -653,7 +653,24 @@ def _op_summary(op: dict) -> str:
         return f"wants updated: {len(op['wants'])} saved"
     if name == "set_busy_load":
         return f"busy load set to {op['value']}"
+
+
+
     return "nothing to change"
+
+
+def _rider_summaries(ops: list) -> list[dict]:
+    """Finding 13: the UI needs the deferred riders, but never the raw ops. Server-side labels only.
+
+    `_op_summary` is a fixed template over closed-vocabulary fields, so a rider label can never
+    smuggle provider prose — the same discipline as the counterpart notes.
+    """
+    out: list[dict] = []
+    for op in ops:
+        if not isinstance(op, dict) or op.get("op") in ("set_windows", "set_events", "none", None):
+            continue
+        out.append({"op": op.get("op"), "summary": _op_summary(op)})
+    return out
 
 
 def _merge_ops(
@@ -946,7 +963,15 @@ async def run_turn(conn, uid: int, turn: Turn) -> AsyncIterator[dict]:
         if pending_id is None:  # the account went away mid-turn: nothing is stored
             yield {"type": "done"}
             return
-        yield {"type": "preview", "id": pending_id, "kind": kind, "items": items}
+        # Finding 13: riders ride along as server-templated labels on the event too — the UI
+        # never needs (and never gets) the raw ops.
+        yield {
+            "type": "preview",
+            "id": pending_id,
+            "kind": kind,
+            "items": items,
+            "riders": _rider_summaries(ops),
+        }
         yield {"type": "state", "state": state_summary(conn, uid)}
         yield {"type": "done"}
         return
@@ -1075,15 +1100,18 @@ def chat_history(user=Depends(require_session), conn=Depends(db.get_conn)):
     pending = None
     if pending_row is not None:
         try:
-            items = json.loads(pending_row["payload_json"]).get("items")
+            stored_payload = json.loads(pending_row["payload_json"])
         except Exception:
-            items = None
+            stored_payload = {}
+        items = stored_payload.get("items")
         if not isinstance(items, dict):  # a row from before F13 (or a foreign writer)
             items = {"windows": [], "events": []}
+        ops = stored_payload.get("ops") if isinstance(stored_payload.get("ops"), list) else []
         pending = {
             "id": pending_row["id"],
             "kind": pending_row["kind"],
             "items": items,
+            "riders": _rider_summaries(ops),
             "expires_at": pending_row["expires_at"],
             "state_hash": pending_row["state_hash"],
         }

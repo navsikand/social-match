@@ -158,10 +158,10 @@
 
   // ---------------------------------------------------------------- status line (finding 14)
   // An error or conflict must SURVIVE the stream: the server always ends a failed turn with a
-  // `done` event, and the old code hid the status on any event. notify() clears the sticky flag;
-  // notifySticky() raises it. Only a new send clears it (see sendTurn's first line).
+  // `done` event, and the old code hid the status on any event. notifySticky() raises the flag;
+  // ONLY a new send (sendTurn's first lines) lowers it. notify() itself must not reset it, so
+  // a success note after an error can never wipe the error the student still needs to read.
   function notify(text, cls) {
-    statusSticky = false;
     show(status, text, cls);
   }
 

@@ -308,7 +308,9 @@ def test_chat_status_line_error_is_sticky_across_done(client):
     sticky_body = html.split("function notifySticky(text, cls) {", 1)[1].split("}", 1)[0]
     assert "statusSticky = true;" in sticky_body
     plain_body = html.split("function notify(text, cls) {", 1)[1].split("}", 1)[0]
-    assert "statusSticky = false;" in plain_body
+    # Reviewer finding 14: notify() must NOT reset the flag (a success note after an error
+    # must never wipe the error). Only a new send lowers it — asserted further down.
+    assert "statusSticky" not in plain_body
     assert "notifySticky(errorLine(event.code, event.detail));" in html
     assert 'notifySticky("Nothing was applied: "' in html
 
