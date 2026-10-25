@@ -272,6 +272,49 @@ def _dashboard(client, uid):
     return r.json()["candidates"]
 
 
+def test_dashboard_reports_the_two_things_that_make_an_account_matchable(seeded, client):
+    """A fresh account must be told what is missing, not shown "No open cards right now".
+
+    This is the signup that stopped after registration: seeded grants, no photo, no windows.
+    """
+    a = util.mk_user("fresh@x.test", "Fresh", photo=False)
+    util.direct_session(client, a)
+    body = client.get("/api/dashboard").json()
+
+    assert body["has_photo"] is False
+    assert body["windows"] == 0
+    assert body["candidates"] == []
+    # A direct SQL seed carries no grants; registration seeds them. Grant explicitly so this
+    # test is about onboarding state, not about grant seeding.
+    util.grant(a, "matching")
+    assert client.get("/api/dashboard").json()["matching"] is True
+
+    # Add a photo: still not matchable, because there is no free time yet.
+    util.tags(a, ["coffee"])  # unrelated write, must not invent windows
+    conn = util.conn()
+    try:
+        with db.immediate(conn):
+            conn.execute("UPDATE users SET photo_path='fresh.jpg' WHERE id=?", (a,))
+    finally:
+        conn.close()
+    body = client.get("/api/dashboard").json()
+    assert body["has_photo"] is True
+    assert body["windows"] == 0, "no windows yet -> still step two"
+
+    # With a window the setup is complete and the payload says so.
+    util.windows(a, [("2026-10-29T19:00:00", "2026-10-29T21:00:00")])
+    body = client.get("/api/dashboard").json()
+    assert body["windows"] == 1
+    assert body["has_photo"] is True
+
+
+def test_dashboard_reports_matching_off(seeded, client):
+    a = util.mk_user("matching-off@x.test", "Off")
+    util.direct_session(client, a)
+    body = client.get("/api/dashboard").json()
+    assert body["matching"] is False, "no matching grant -> the UI must be able to say so"
+
+
 def test_dashboard_row_carries_person_window_and_flags(seeded, client):
     a, b, cid, pid = _pair()
     rows = _dashboard(client, a)

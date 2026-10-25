@@ -7,6 +7,28 @@
     Nothing is shared until both sides confirm.</p>
 </section>
 
+<section class="panel" id="setup" hidden>
+  <h2>Finish setting up</h2>
+  <p class="muted">Two steps before anyone can appear on your cards.</p>
+  <ol class="setup-list">
+    <li id="setup-photo" hidden>
+      <b>Add a photo</b>
+      <span class="muted">Required — nobody is matchable without one.</span>
+      <a class="button primary" href="/settings">Add a photo</a>
+    </li>
+    <li id="setup-windows" hidden>
+      <b>Tell your assistant when you're free</b>
+      <span class="muted">It turns “free weekends” into concrete windows you Confirm.</span>
+      <a class="button primary" href="/chat">Open chat</a>
+    </li>
+    <li id="setup-matching" hidden>
+      <b>Turn matching on</b>
+      <span class="muted">Off means no cards can be generated at all.</span>
+      <a class="button primary" href="/settings">Open Settings</a>
+    </li>
+  </ol>
+</section>
+
 <section class="panel">
   <h2>Open cards</h2>
   <p id="dash-photo" class="notice warn" hidden>A photo is required before you can appear on
@@ -70,11 +92,45 @@
     return el;
   }
 
+  // A fresh account used to see "No open cards right now", which reads like the product is
+  // idle rather than "you are not matchable yet". Show the two things that are actually
+  // missing, each one link away, and hide the panel the moment both are done.
+  function renderSetup(data) {
+    const panel = document.getElementById("setup");
+    if (!panel) return;
+    const hasPhoto = Boolean(data && data.has_photo);
+    const windows = (data && data.windows) || 0;
+    const matching = !data || data.matching !== false;
+    const steps = [
+      ["setup-photo", !hasPhoto],
+      ["setup-windows", windows === 0],
+      ["setup-matching", !matching],
+    ];
+    let any = false;
+    for (const [id, needed] of steps) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      el.hidden = !needed;
+      if (needed) any = true;
+    }
+    panel.hidden = !any;
+    const list = document.getElementById("dash-list");
+    if (any && list) list.textContent = "";
+  }
+
   function render(items, note) {
     list.innerHTML = "";
     for (const item of items) list.appendChild(cardEl(item));
     if (items.length === 0) {
-      show(status, note || "No open cards right now.", "info");
+      const setup = document.getElementById("setup");
+      const blocked = setup && !setup.hidden;
+      show(
+        status,
+        note || (blocked
+          ? "No cards yet — finish the two steps above and the matcher can look."
+          : "No open cards right now."),
+        "info",
+      );
     } else {
       status.hidden = true;
     }
@@ -129,6 +185,7 @@
     if (key === lastPayload) return;
     lastPayload = key;
     const items = (data && data.candidates) || [];
+    renderSetup(data);
     render(items);
     showOutcome();
   }

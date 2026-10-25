@@ -125,6 +125,17 @@ h1 { font-size: 2rem; margin: 0 0 0.5rem; line-height: 1.15; }
 h2 { font-size: 1.3rem; margin: 0 0 0.75rem; }
 h3 { margin: 0 0 0.25rem; }
 
+
+/* Dashboard setup checklist: the two steps that make an account matchable. */
+.setup-list { list-style: none; margin: .8rem 0 0; padding: 0; }
+.setup-list li {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .9rem;
+  padding: .8rem 0; border-top: 1px solid var(--line);
+}
+.setup-list li:first-child { border-top: 0; }
+.setup-list b { font-size: 1rem; }
+.setup-list span { flex: 1 1 16rem; font-size: .9rem; }
+.setup-list .button { flex: 0 0 auto; }
 .muted { color: var(--muted); }
 .small { font-size: 0.85rem; }
 

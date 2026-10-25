@@ -161,6 +161,22 @@ def dashboard(conn, uid: int) -> dict:
     now = db.utcnow()
     me = db.one(conn, "SELECT photo_path FROM users WHERE id=?", (uid,))
     has_photo = bool(me and me["photo_path"])
+    # Onboarding state. A brand-new account is not matchable until it has a photo AND at
+    # least one free window, and the dashboard used to say only "No open cards right now" —
+    # which reads like nothing is happening rather than "you have not finished setting up".
+    window_count = (
+        db.one(conn, "SELECT COUNT(*) AS n FROM availability_windows WHERE user_id=?", (uid,))
+        or {"n": 0}
+    )["n"]
+    matching_on = (
+        db.one(
+            conn,
+            "SELECT 1 FROM grants WHERE user_id=? AND kind='matching'"
+            " AND withdrawn_at IS NULL AND expires_at > ? LIMIT 1",
+            (uid, now),
+        )
+        is not None
+    )
     rows = db.q(
         conn,
         "SELECT * FROM candidates WHERE (user_a=? OR user_b=?) AND state='open' AND expires_at > ?"
@@ -203,7 +219,12 @@ def dashboard(conn, uid: int) -> dict:
                 "awaiting_them": awaiting_them,
             }
         )
-    return {"has_photo": has_photo, "candidates": candidates}
+    return {
+        "has_photo": has_photo,
+        "windows": window_count,
+        "matching": matching_on,
+        "candidates": candidates,
+    }
 
 
 # ------------------------------------------------------------------ matches
