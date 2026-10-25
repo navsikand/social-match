@@ -80,6 +80,13 @@ CREATE TABLE IF NOT EXISTS hobby_tags (
   PRIMARY KEY (user_id, tag)
 );
 
+CREATE TABLE IF NOT EXISTS interest_raw (
+  user_id INTEGER NOT NULL,
+  raw TEXT NOT NULL,
+  canonical TEXT,               -- NULL = nothing in the vocabulary matched; never scored
+  PRIMARY KEY (user_id, raw)
+);
+
 CREATE TABLE IF NOT EXISTS user_wants (
   user_id INTEGER NOT NULL,
   want TEXT NOT NULL CHECK (want IN ('hangout','event')),

@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-from server import config, db, matching, wording
+from server import config, db, interests, matching, wording
 from server.auth import get_identity
 from server.schema import StatePayload
 
@@ -152,6 +152,10 @@ async def post_state(
 
         prev = db.one(conn, "SELECT payload_hash FROM availability WHERE user_id=?", (user_id,))
         changed = prev is None or prev["payload_hash"] != digest
+        # Defaults: the refusal path stores no interests, but still answers with the shape.
+        canonical: list[str] = []
+        mapped: list[dict] = []
+        unscored: list[str] = []
 
         if not payload.consent.matching:
             # CONTRACT S5: consent.matching false stores NOTHING but a consent_log entry.
@@ -200,10 +204,25 @@ async def post_state(
                     (user_id, _to_utc(win.start, win.tz), _to_utc(win.end, win.tz), win.tz),
                 )
 
+            # Interests: store the CANONICAL tag (what the matcher scores and what a card
+            # shows) plus every raw string the student actually said, so we can tell them
+            # "matcha -> coffee" instead of rejecting their word.
+            canonical, mapped, unscored = interests.normalize_many(payload.tags)
             conn.execute("DELETE FROM hobby_tags WHERE user_id=?", (user_id,))
-            for tag in payload.tags:
+            for tag in canonical:
                 conn.execute(
                     "INSERT OR REPLACE INTO hobby_tags (user_id, tag) VALUES (?,?)", (user_id, tag)
+                )
+            conn.execute("DELETE FROM interest_raw WHERE user_id=?", (user_id,))
+            for entry in mapped:
+                conn.execute(
+                    "INSERT OR REPLACE INTO interest_raw (user_id, raw, canonical) VALUES (?,?,?)",
+                    (user_id, entry["raw"], entry["tag"]),
+                )
+            for raw in unscored:
+                conn.execute(
+                    "INSERT OR REPLACE INTO interest_raw (user_id, raw, canonical) VALUES (?,?,NULL)",
+                    (user_id, raw),
                 )
 
 
@@ -255,5 +274,16 @@ async def post_state(
             matching.generate_for_user(conn, user_id)
 
     return JSONResponse(
-        status_code=201, content={"changed": changed, "expires_at": expires_at}
+        status_code=201,
+        content={
+            "changed": changed,
+            "expires_at": expires_at,
+            # Tell the student what their word became. `scored` is what matching compares;
+            # `kept_unscored` is theirs alone and never appears on a card.
+            "interests": {
+                "scored": canonical if payload.consent.matching else [],
+                "mapped": mapped if payload.consent.matching else [],
+                "kept_unscored": unscored if payload.consent.matching else [],
+            },
+        },
     )

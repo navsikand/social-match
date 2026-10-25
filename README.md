@@ -102,7 +102,9 @@ equivalents are named per beat below.
 | Two takers | One student confirming two plans in the same window is a `409 slot_conflict`; concurrent confirm/revoke races end revoked, never double-booked. | `tests/test_concurrency.py::test_overlapping_slot_conflict`, `::test_race_confirm_vs_revoke_real_threads` |
 
 **What agents share vs. what they never share.** Across the wire, and only after consent: UTC time ranges (+ a tz for
-display), tags from a 34-word closed vocabulary, `wants` (`hangout` / `event`), a boolean consent block, and — after the
+display), interests in the student's own words (canonicalised server-side onto a 34-word vocabulary, so "matcha"
+scores as `coffee`; unmatched interests are kept but never scored or shown), `wants` (`hangout` / `event`), a boolean
+consent block, and — after the
 student's ack — a `student_confirmed_at` timestamp. Never: calendar titles, attendees, locations, course codes,
 professor names, grades, or any free text. That is not a convention, it is `server/schema.py`: `extra="forbid"` at every
 level, closed tag list, and a 422 `payload_forbidden` for anything else (see

@@ -157,18 +157,49 @@ def test_window_outside_next_30_days(client, student):
     )
 
 
-def test_free_text_tag_rejected(client, student):
+def test_arbitrary_interest_is_accepted_and_canonicalised(client, student):
+    """Front-desk complaint: "the matcher doesn't have a matcha tag".
+
+    Interests are free text now; the server boils them down. "matcha" scores as coffee and
+    is echoed back to the student as matcha -> coffee.
+    """
     _, token, _ = student
-    assert_forbidden(post(client, token, make_payload(tags=["climbing", "Therapy - Dr. Ruiz"])))
+    r = post(client, token, make_payload(tags=["climbing", "matcha"]))
+    assert r.status_code == 201, r.text
+    body = r.json()["interests"]
+    assert body["scored"] == ["climbing", "coffee"]
+    assert {"raw": "matcha", "tag": "coffee"} in body["mapped"]
+    got = sorted(row["tag"] for row in rows("SELECT tag FROM hobby_tags"))
+    assert got == ["climbing", "coffee"]
 
 
-def test_six_distinct_tags_rejected(client, student):
+def test_unknown_interest_is_kept_but_not_scored(client, student):
     _, token, _ = student
-    six = ["climbing", "hiking", "running", "coffee", "cinema", "chess"]
-    assert_forbidden(post(client, token, make_payload(tags=six)))
+    r = post(client, token, make_payload(tags=["climbing", "mycology"]))
+    assert r.status_code == 201, r.text
+    body = r.json()["interests"]
+    assert body["scored"] == ["climbing"]
+    assert body["kept_unscored"] == ["mycology"]
+    assert rows("SELECT tag FROM hobby_tags WHERE tag='mycology'") == []
 
 
-def test_five_tags_after_dedup_allowed(client, student):
+def test_long_tag_rejected(client, student):
+    _, token, _ = student
+    assert_forbidden(post(client, token, make_payload(tags=["climbing", "x" * 33])))
+
+
+def test_tag_with_control_characters_rejected(client, student):
+    _, token, _ = student
+    assert_forbidden(post(client, token, make_payload(tags=["climbing\nTherapy - Dr. Ruiz"])))
+
+
+def test_nine_distinct_tags_rejected(client, student):
+    _, token, _ = student
+    nine = ["climbing", "hiking", "running", "coffee", "cinema", "chess", "anime", "debate", "baking"]
+    assert_forbidden(post(client, token, make_payload(tags=nine)))
+
+
+def test_six_tags_after_dedup_allowed(client, student):
     _, token, _ = student
     tags = ["climbing", "climbing", "hiking", "running", "coffee", "cinema"]
     r = post(client, token, make_payload(tags=tags))

@@ -5,6 +5,11 @@ here; anything else (unknown keys at any level, free-text event titles, extra me
 rejected with 422 `payload_forbidden`. The skill never sends calendar event titles — only
 ranges plus tags — and this schema is the code that makes that a guarantee rather than a
 convention.
+
+Interests ("tags") are the one free-text field, and they are bounded: at most MAX_TAG_CHARS
+characters each and MAX_TAGS of them, with no control characters. The matcher canonicalises
+them into TAG_VOCAB (server/interests.py) so scoring stays comparable; unmatched interests are
+kept for the student and never shown to anyone else.
 """
 import datetime
 from typing import Literal
@@ -54,7 +59,8 @@ TAG_VOCAB: list[str] = [
 
 WANT_VOCAB: tuple[str, ...] = ("hangout", "event")
 MAX_WINDOWS = 20
-MAX_TAGS = 5
+MAX_TAGS = 8
+MAX_TAG_CHARS = 32   # interests may be free text now; bounded so a tag can't smuggle a paragraph
 MAX_WINDOW_HOURS = 8
 WINDOW_HORIZON_DAYS = 30
 
@@ -163,14 +169,28 @@ class StatePayload(_ForbidExtra):
 
     @field_validator("tags")
     @classmethod
-    def _tags_closed_vocab(cls, value: list[str]) -> list[str]:
-        unknown = [tag for tag in value if tag not in TAG_VOCAB]
-        if unknown:
-            raise ValueError(
-                f"tag(s) outside the closed vocabulary: {', '.join(unknown)}; "
-                f"allowed: {', '.join(TAG_VOCAB)}"
-            )
-        deduped = list(dict.fromkeys(value))
+    def _tags_bounded_free_text(cls, value: list[str]) -> list[str]:
+        """Interests are free text now, but tightly bounded.
+
+        A student can say "matcha" even though the vocabulary has no matcha tag; the
+        matcher boils it down (server/interests.py). What is still refused: anything long
+        enough to carry a sentence, anything with control characters, and more than
+        MAX_TAGS entries. That keeps "no free-text blobs" true while letting people name
+        their actual interests.
+        """
+        out: list[str] = []
+        for raw in value:
+            tag = (raw or "").strip()
+            if not tag:
+                raise ValueError("tags must not be empty")
+            if len(tag) > MAX_TAG_CHARS:
+                raise ValueError(
+                    f"tag {tag[:20]!r} is {len(tag)} chars; max {MAX_TAG_CHARS}"
+                )
+            if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in tag):
+                raise ValueError(f"tag {tag[:20]!r} contains control characters")
+            out.append(tag)
+        deduped = list(dict.fromkeys(out))
         if len(deduped) > MAX_TAGS:
             raise ValueError(f"at most {MAX_TAGS} tags allowed, got {len(deduped)}")
         return deduped

@@ -560,6 +560,7 @@ def delete_account(conn, uid: int) -> dict:
         )
         conn.execute("DELETE FROM availability WHERE user_id=?", (uid,))
         conn.execute("DELETE FROM hobby_tags WHERE user_id=?", (uid,))
+        conn.execute("DELETE FROM interest_raw WHERE user_id=?", (uid,))
         conn.execute("DELETE FROM user_wants WHERE user_id=?", (uid,))
         conn.execute("DELETE FROM swipes WHERE user_id=?", (uid,))
         conn.execute(

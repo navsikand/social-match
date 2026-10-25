@@ -244,7 +244,7 @@ A trusted Skill is not a security boundary, so the claim is about what the serve
 ```jsonc
 {
   "windows": [{"start": "2026-10-29T19:00", "end": "2026-10-29T21:00", "tz": "America/Los_Angeles"}],
-  "tags": ["climbing", "live_music"],            // closed vocabulary, max 5
+  "tags": ["climbing", "live_music", "matcha"],  // free text, max 8; matcher canonicalises
   "wants": ["hangout", "event"],
   "free_time": {"source": "cubbie_computed", "student_confirmed_at": "2026-10-24T09:10:00Z"},
   "consent": {"matching": true, "publication": {"tier": "card+name", "version": 3}}
@@ -344,7 +344,8 @@ consent_log  (id, user_id_hash, action, scope, detail_json, created_at)
 availability (user_id, written_by_agent_id, payload_hash, observed_at,
               expires_at, source)                     -- source: 'student' | 'cubbie_computed'
 availability_windows (user_id, starts_at, ends_at, tz)
-hobby_tags   (user_id, tag)                           -- closed vocabulary
+hobby_tags   (user_id, tag)                           -- canonical vocabulary (scored + shown)
+interest_raw  (user_id, raw, canonical)               -- the student's own words; never shown
 
 candidates   (id, user_a, user_b, score, reasons_json, created_at, expires_at, state)
 proposals    (id, candidate_id, window_start, window_end, version, state, expires_at)

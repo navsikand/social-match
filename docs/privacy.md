@@ -12,8 +12,12 @@ Only these things, and only because matching does not work without them:
   id you pick from a fixed list.
 - Availability: your free windows as start and end times in UTC, plus the time zone they were given in so we can print
   them back in your own local time.
-- Hobby tags: at most five, chosen from a fixed vocabulary of 34 interests. There is no free-text field and no custom
-  tag, so a tag can never become a sentence about you.
+- Interests: at most eight short tags (32 characters each), in your own words — "matcha", "sourdough", "bouldering".
+  These are the only free-text field in the system, and they are tightly bounded: no line breaks, no control
+  characters, no paragraph. The server translates each one onto its matching vocabulary ("matcha" counts as coffee).
+  Your raw words stay attached to your own account and are shown back to you; **only the canonical tag ever appears
+  on a card**, so your phrasing is never shown to another student. An interest nothing matches is kept for you and
+  never scored.
 - Wants: zero to two words from `hangout` and `event` — whether you would rather meet up or go to an
   event. Nothing else fits the field, so nothing else can be written into it.
 - Consent log: one row per grant or withdrawal, recording the action, its scope and when it happened.
@@ -28,7 +32,8 @@ field for them and the validator refuses unknown fields at every level of the pa
 - calendar event titles, attendees, or locations;
 - course codes, course names, professor names, or assignment names;
 - grades, of any kind, anywhere;
-- free text of any description.
+- free text of any description — with one bounded exception: interests (the tags above), which are capped at 32
+  characters each and at most eight of them, and are canonicalised before they are used for anything.
 
 That is the point of the design: your Cubbie agent reads your calendar on your phone, turns it into time ranges plus
 tags, and deletes the rest. What reaches this server is a handful of intervals and a few words from a closed list.

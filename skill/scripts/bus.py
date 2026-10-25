@@ -31,7 +31,8 @@ USER_AGENT = "study-match-skill/0.1"
 DEFAULT_DATA_DIR = "./skill_data"
 TIMEOUT_SECONDS = 20
 
-# CONTRACT S5: the closed vocabulary. A tag outside this list is rejected by the server.
+# CONTRACT S5: the preferred vocabulary. Interests are free text now (the server
+# canonicalises them into this list), so an unknown tag is NOT an error here either.
 TAG_VOCAB = [
     "bouldering", "climbing", "hiking", "running", "gym", "swimming", "cycling", "basketball", "soccer",
     "tennis", "ultimate_frisbee", "board_games", "video_games", "chess", "painting", "drawing", "photography",
@@ -45,7 +46,8 @@ FREE_TIME_KEYS = {"source", "student_confirmed_at"}
 CONSENT_KEYS = {"matching", "publication"}
 PUBLICATION_KEYS = {"tier"}
 MAX_WINDOWS = 20
-MAX_TAGS = 5
+MAX_TAGS = 8
+MAX_TAG_CHARS = 32
 
 
 # ---------------------------------------------------------------- config
@@ -202,9 +204,14 @@ def payload_problems(payload):
     if not isinstance(tags, list):
         problems.append("tags must be a list")
     else:
-        unknown = sorted({tag for tag in tags if tag not in TAG_VOCAB})
-        if unknown:
-            problems.append(f"tags not in TAG_VOCAB: {', '.join(map(str, unknown))}")
+        for tag in tags:
+            if not isinstance(tag, str) or not tag.strip():
+                problems.append("every tag must be a non-empty string")
+                continue
+            if len(tag.strip()) > MAX_TAG_CHARS:
+                problems.append(f"tag {tag[:20]!r} is longer than {MAX_TAG_CHARS} characters")
+            if any(ord(ch) < 0x20 for ch in tag):
+                problems.append(f"tag {tag[:20]!r} contains control characters")
         if len(set(tags)) > MAX_TAGS:
             problems.append(f"at most {MAX_TAGS} tags are allowed")
 
@@ -408,9 +415,20 @@ def selftest(args):
     check(any("student_confirmed_at" in problem for problem in payload_problems(unconfirmed)),
           "cubbie_computed without student_confirmed_at is caught", failures)
 
-    bad_tags = good_payload()
-    bad_tags["tags"] = ["therapy"]
-    check(any("TAG_VOCAB" in problem for problem in payload_problems(bad_tags)), "a free-text tag is caught", failures)
+    # Interests are free text now: "matcha" is fine (the server canonicalises it).
+    free_text = good_payload()
+    free_text["tags"] = ["therapy", "matcha"]
+    check(payload_problems(free_text) == [], "an interest outside TAG_VOCAB is allowed", failures)
+
+    long_tag = good_payload()
+    long_tag["tags"] = ["x" * (MAX_TAG_CHARS + 1)]
+    check(any("longer than" in problem for problem in payload_problems(long_tag)),
+          "an over-long tag is caught", failures)
+
+    control = good_payload()
+    control["tags"] = ["climbing\nTherapy - Dr. Ruiz"]
+    check(any("control characters" in problem for problem in payload_problems(control)),
+          "a tag with control characters is caught", failures)
 
     bad_want = good_payload()
     bad_want["wants"] = ["party"]
