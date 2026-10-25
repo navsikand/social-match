@@ -26,18 +26,17 @@ python3 -m http.server 8000 -d demo/pitch    # → http://localhost:8000
 
 Every slide is deep-linkable: `index.html#7` opens on slide 7, and the URL follows you as you move.
 
-## Order (10 slides)
+## Order (9 slides)
 
 1. Title — the one-liner
 2. The problem — "so when are you free?" (11 messages, 3 days)
 3. The idea — machines decide the *what*, humans decide the *whether*
 4. The loop — five beats, one decision
 5. Architecture — four pieces, one firewall
-6. Consent — five grants, re-read at the moment of use
-7. Privacy — what crosses the wire vs what never does
-8. Conflicting constraints — the budget → ramen counter, reason codes only
-9. The one line — an agent may propose; a human confirms
-10. Try it — two accounts, sixty seconds, and the closing pun
+6. Privacy — what crosses the wire vs what never does
+7. Conflicting constraints — the budget → ramen counter, reason codes only
+8. The one line — an agent may propose; a human is the only one who confirms
+9. Try it — two accounts, sixty seconds, and the closing pun
 
 Speaker notes live in each slide's `data-notes` attribute — press `N` to see them while presenting.
 
