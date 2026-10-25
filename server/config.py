@@ -51,8 +51,8 @@ def encoder_cache_dir() -> str:
 
 
 def encoder_device() -> str:
-    """auto = cuda when torch can see a GPU, else cpu. Anything else is passed through."""
-    return (_str_env("ENCODER_DEVICE") or "auto").lower()
+    """cpu by default: the pinned torch build is CPU-only. auto = cuda when torch sees a GPU."""
+    return (_str_env("ENCODER_DEVICE") or "cpu").lower()
 
 
 def encoder_template() -> str:

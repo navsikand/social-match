@@ -13,9 +13,21 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The learned interest encoder (server/encoder.py). Heavy (torch); without it the server falls back
-# to the hand-made taxonomy. Install with: uv sync --extra encoder
-encoder = ["sentence-transformers>=3.0"]
+# The learned interest encoder (server/encoder.py). Without it the server falls back to the
+# hand-made taxonomy. Install with: uv sync --extra encoder
+#
+# CPU-ONLY, deliberately. The model is bge-small (33M params) and we embed 34 tags once at
+# startup, so a GPU saves milliseconds while pulling ~2.5 GB of CUDA wheels. The torch source
+# below pins the CPU build on every machine, so `auto` can never silently drag in CUDA.
+encoder = ["sentence-transformers>=3.0", "torch>=2.0"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [dependency-groups]
 dev = ["pytest>=8.0"]
