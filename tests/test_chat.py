@@ -325,7 +325,9 @@ def test_windows_become_a_preview_not_a_write(client, monkeypatch):
     r = client.post("/api/chat", json={"content": "I'm free Thursday evening"})
     preview = last_event(r, "preview")
     assert preview["kind"] == "windows"
-    assert preview["items"][0]["tz"] == TZ
+    assert set(preview["items"]) == {"windows", "events"}, "typed sections (F13)"
+    assert preview["items"]["windows"][0]["tz"] == TZ
+    assert preview["items"]["events"] == []
 
     conn = db.connect()
     try:
@@ -1022,6 +1024,97 @@ def test_done_marker_executes(client, monkeypatch):
     r = client.post("/api/chat", json={"content": "matcha please"})
 
     assert last_event(r, "actions")["applied"][0]["op"] == "set_interests"
+
+
+# ------------------------------------------------------------------ section: pending sections
+# Gate review P2 #13: a batch that proposes windows AND events used to arrive as one flattened
+# list under a single `kind`; `ops` still applies, `items` is now typed.
+
+EVENT_OK = {
+    "url": "https://example.com/gig",
+    "category": "music",
+    "start": "2026-10-30T19:00:00",
+    "end": "2026-10-30T22:00:00",
+    "tz": TZ,
+}
+
+
+def test_mixed_proposal_payload_is_typed_sections(client, monkeypatch):
+    uid = _register(client)
+    monkeypatch.setattr(
+        chat.ai,
+        "stream_reply",
+        reply_with_fence(
+            [
+                {"op": "set_windows", "windows": [WINDOW_OK]},
+                {"op": "set_events", "events": [EVENT_OK]},
+                {"op": "set_wants", "wants": ["hangout"]},
+            ]
+        ),
+    )
+
+    preview = last_event(client.post("/api/chat", json={"content": "free Thursday"}), "preview")
+
+    assert set(preview["items"]) == {"windows", "events"}
+    assert len(preview["items"]["windows"]) == 1
+    assert len(preview["items"]["events"]) == 1
+    assert preview["items"]["events"][0]["url"] == EVENT_OK["url"]
+
+    # the history representation carries the same shape for the same preview
+    pending = client.get("/api/chat/history").json()["pending"]
+    assert pending["id"] == preview["id"]
+    assert set(pending["items"]) == {"windows", "events"}
+    assert pending["items"]["events"][0]["category"] == "music"
+
+    # and the APPLY path is unchanged: one confirm applies every op in the batch
+    ok = client.post("/api/chat/confirm", json={"id": preview["id"]})
+    assert ok.status_code == 200, ok.text
+    assert sorted(item["op"] for item in ok.json()["confirmations"]) == [
+        "set_events", "set_wants", "set_windows",
+    ]
+    conn = db.connect()
+    try:
+        assert db.one(conn, "SELECT COUNT(*) AS n FROM availability_windows WHERE user_id=?", (uid,))["n"] == 1
+        assert db.one(conn, "SELECT COUNT(*) AS n FROM user_events WHERE user_id=?", (uid,))["n"] == 1
+    finally:
+        conn.close()
+
+
+def test_chat_confirm_refuses_an_ics_preview(client):
+    """F13: an ICS preview belongs to /api/schedule/ics/confirm, never to chat."""
+    uid = _register(client)
+    conn = db.connect()
+    try:
+        with db.immediate(conn):
+            cursor = conn.execute(
+                "INSERT INTO chat_pending (user_id, kind, payload_json, state_hash, created_at,"
+                " expires_at) VALUES (?,?,?,?,?,?)",
+                (
+                    uid,
+                    "ics",
+                    json.dumps({"ops": [], "items": {"windows": [WINDOW_OK], "events": []}}),
+                    chat.current_state_hash(conn, uid),
+                    db.utcnow(),
+                    db.utcnow(days=1),
+                ),
+            )
+            pending_id = int(cursor.lastrowid or 0)
+    finally:
+        conn.close()
+
+    r = client.post("/api/chat/confirm", json={"id": pending_id})
+
+    assert r.status_code == 422
+    assert r.json()["error"] == "payload_forbidden"
+    assert "schedule" in r.json()["detail"]
+    assert _pending_rows(uid) == 1, "the schedule surface still owns that row"
+    conn = db.connect()
+    try:
+        assert db.one(
+            conn, "SELECT COUNT(*) AS n FROM availability_windows WHERE user_id=?", (uid,)
+        )["n"] == 0
+    finally:
+        conn.close()
 
 
 # ------------------------------------------------------------------ section: lifecycle

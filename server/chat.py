@@ -612,25 +612,33 @@ def _validate_actions(actions: list[Any]) -> tuple[list[dict] | None, str | None
     return ops, None
 
 
-def _normalize_proposal(ops: list[dict]) -> tuple[str, list[dict], list[str]]:
-    """Validate every window/event item NOW; return (kind, items, errors)."""
+def _normalize_proposal(ops: list[dict]) -> tuple[str, dict[str, list[dict]], list[str]]:
+    """Validate every window/event item NOW; return (kind, sections, errors).
+
+    F13: `sections` is the payload's `items`, split by TYPE — {"windows": [...], "events": [...]}
+    — so a batch that proposes both renders and confirms in groups instead of one flattened,
+    wrongly-typed list. `kind` keeps its historical meaning for the surface ('windows' wins a
+    mixed batch) and `ops` stays the APPLY source of truth: sections are display only.
+    """
     kind = "windows" if any(op["op"] == "set_windows" for op in ops) else "events"
-    items: list[dict] = []
+    sections: dict[str, list[dict]] = {"windows": [], "events": []}
     errors: list[str] = []
     for op in ops:
         if op["op"] == "set_windows":
             for index, raw in enumerate(op["windows"]):
                 try:
-                    items.append(Window.model_validate(raw).model_dump(mode="json"))
+                    sections["windows"].append(Window.model_validate(raw).model_dump(mode="json"))
                 except ValidationError as exc:
                     errors.append(f"window {index + 1}: {_first_error(exc)}")
         elif op["op"] == "set_events":
             for index, raw in enumerate(op["events"]):
                 try:
-                    items.append(PublicEvent.model_validate(raw).model_dump(mode="json"))
+                    sections["events"].append(
+                        PublicEvent.model_validate(raw).model_dump(mode="json")
+                    )
                 except ValidationError as exc:
                     errors.append(f"event {index + 1}: {_first_error(exc)}")
-    return kind, items, errors
+    return kind, sections, errors
 
 
 def _op_summary(op: dict) -> str:
@@ -687,7 +695,7 @@ def _merge_ops(
 
 
 def _store_pending(
-    conn, uid: int, kind: str, ops: list[dict], items: dict | list[dict], state_hash: str
+    conn, uid: int, kind: str, ops: list[dict], items: dict[str, list[dict]], state_hash: str
 ) -> int | None:
     """One preview row. Returns None when the account is gone (nothing is stored)."""
     now = db.utcnow()
@@ -920,7 +928,9 @@ async def run_turn(conn, uid: int, turn: Turn) -> AsyncIterator[dict]:
         yield {"type": "note", "text": refusal}
         yield {"type": "done"}
         return
-    assert ops is not None
+    if ops is None:  # pragma: no cover - _validate_actions returns ops or a refusal
+        yield {"type": "done"}
+        return
 
     proposal_ops = [op for op in ops if op["op"] in ("set_windows", "set_events")]
     if proposal_ops:
@@ -1065,9 +1075,11 @@ def chat_history(user=Depends(require_session), conn=Depends(db.get_conn)):
     pending = None
     if pending_row is not None:
         try:
-            items = json.loads(pending_row["payload_json"]).get("items", [])
+            items = json.loads(pending_row["payload_json"]).get("items")
         except Exception:
-            items = []
+            items = None
+        if not isinstance(items, dict):  # a row from before F13 (or a foreign writer)
+            items = {"windows": [], "events": []}
         pending = {
             "id": pending_row["id"],
             "kind": pending_row["kind"],
@@ -1216,7 +1228,7 @@ def _confirm_apply(
     batch_ops, refusal = _validate_actions(ops)
     if refusal is not None or batch_ops is None:
         return dead(409, "conflict", refusal or "that preview is no longer valid — ask again")
-    _, items, errors = _normalize_proposal(batch_ops)
+    _, sections, errors = _normalize_proposal(batch_ops)
     window_count = sum(len(op["windows"]) for op in batch_ops if op["op"] == "set_windows")
     if window_count > MAX_WINDOWS:
         errors.append(f"at most {MAX_WINDOWS} windows")
@@ -1247,7 +1259,7 @@ def _confirm_apply(
         summary = _op_summary(op)
         confirmations.append({"op": op["op"], "summary": summary})
         persist_note(conn, uid, summary)
-    _ = items
+    _ = sections  # display only: `ops` above is what applied
     conn.execute("DELETE FROM chat_pending WHERE id=?", (pending_id,))
     return None
 
@@ -1320,7 +1332,8 @@ async def chat_offer_respond(
         return _forbidden(refusal)
 
     uid = user["id"]
-    assert parsed is not None
+    if parsed is None:  # pragma: no cover - _parse_offer_body returns a dict or a refusal
+        return _forbidden("request body must be a JSON object")
     action = parsed["action"]
     try:
         if action == "offer":
