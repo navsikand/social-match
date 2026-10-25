@@ -7,8 +7,10 @@ transcript partition and the one-op rule are exactly the ones typed turns use.
 
 Load-bearing rules (each has a test):
   * ONE singleton: a module-level `_STARTED` flag; a second `loop()` raises loudly at startup.
-  * RESPONSES ONLY — no initial-offer scanner (PLAN §C2b): the scan looks at offers that already
-    exist and are still pending, never at candidates without one.
+  * TWO SCANS (PLAN §C2b): first the offers that already exist and are still pending (answer
+    them), then the candidates whose current proposal has NO offer yet (open the negotiation).
+    The opening offer is deterministic — when both sides are delegated the LOWER uid acts — so
+    two agents scanning one candidate cannot double-offer.
   * The ADDRESSEE of a pending offer is the candidate's counterpart of `proposer_id`. Without a
     live `delegation` grant and a live account, the worker skips that user silently.
   * Budget: a real `chat_turns` row per attempt (`kind='negotiation'`, `ref='offer:<id>'`), so
@@ -20,12 +22,11 @@ Load-bearing rules (each has a test):
   * Delegation is re-read as an advisory pre-check and verified again after the turn. The
     authoritative recheck belongs inside the apply transaction — see the seam note below.
 
-SEAM (reported, not patched — chat.py is lane B's file): `chat._apply_negotiation_op` re-reads
-`_user_alive` and `_live_grant(conn, uid, "delegation")`, but it runs BEFORE `activity.propose` /
-`activity.respond`, which each open their own `db.immediate`. SQLite cannot nest BEGIN IMMEDIATE,
-so that recheck is a pre-flight statement, not the in-transaction recheck PLAN §C2a asks for; the
-window is "grant withdrawn between that SELECT and the core's BEGIN IMMEDIATE". The worker narrows
-it (pre-check under the lock, post-drain verification) but cannot close it from this file.
+CONSENT ATOMICITY (gate review P1 #1, closed in activity.py): the assistant path calls the
+activity cores with `autonomous=True`, and the cores re-read the delegation grant and the
+account inside their OWN `db.immediate`, after their authorization reads and before the first
+write. The checks in this file and in `chat._apply_negotiation_op` are advisory pre-checks; the
+authoritative one is in the transaction, so a withdrawal that commits between them still wins.
 """
 from __future__ import annotations
 
@@ -34,8 +35,9 @@ import contextlib
 import datetime
 import json
 
-from server import activity, chat, config, db, offers
-from server.scheduling import counterpart
+from server import activity, chat, config, db, offers, wording
+from server.schema import TAG_VOCAB
+from server.scheduling import counterpart, current_proposal, display_tz
 
 # One tick every 15 s (PLAN §C2) — the integrator mounts `loop()` beside `sweep.loop()`.
 _TICK_SECONDS = 15
@@ -138,6 +140,66 @@ def _pending_offers(conn) -> list[tuple[object, dict]]:
             continue
         found.append((cand, dict(offer)))
     return found
+
+
+def _initial_candidates(conn) -> list[tuple[dict, dict]]:
+    """Candidates with a current proposal and NO offer yet (PLAN §C2b, gate review P1 #6).
+
+    The response scan above only ever sees offers that already exist, so without this the
+    assistant could never START a negotiation and the user had to make the first move by hand.
+    """
+    found: list[tuple[dict, dict]] = []
+    for row in db.q(
+        conn,
+        "SELECT id FROM candidates WHERE state IN ('open','matched') AND expires_at > ?"
+        " ORDER BY id",
+        (db.utcnow(),),
+    ):
+        cand = db.one(conn, "SELECT * FROM candidates WHERE id=?", (row["id"],))
+        if cand is None:
+            continue
+        prop = current_proposal(conn, cand["id"])
+        if prop is None or offers.latest_offer(conn, prop["id"]) is not None:
+            continue
+        found.append((dict(cand), dict(prop)))
+    return found
+
+
+def _initial_actor(conn, cand) -> int | None:
+    """Whose assistant opens: the side with live delegation; the LOWER uid when both have it.
+
+    Deterministic on purpose — both agents scanning the same candidate must not double-offer.
+    """
+    sides = [
+        uid
+        for uid in (cand["user_a"], cand["user_b"])
+        if _alive(conn, uid) and _live_delegation(conn, uid)
+    ]
+    return min(sides) if sides else None
+
+
+def _initial_context(conn, cand, prop: dict, uid: int) -> str:
+    """The `system_extra` for the opening offer: candidate, window, shared tags, vocab."""
+    other = counterpart(cand, uid)
+    return json.dumps(
+        {
+            "initial_offer": {
+                "candidate_id": cand["id"],
+                "proposal_version": prop["version"],
+                "window": wording.fmt_window(
+                    prop["window_start"], prop["window_end"], display_tz(conn, cand)
+                ),
+                "shared_activity_tags": sorted(
+                    activity._tags(conn, uid) & activity._tags(conn, other)
+                ),
+                "tag_vocabulary": list(TAG_VOCAB),
+                "max_rounds": offers.MAX_ROUNDS,
+                "my_profile": chat.state_summary(conn, uid),
+            },
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 def _offer_context(conn, cand, offer: dict, uid: int) -> str:
@@ -246,6 +308,32 @@ async def tick_once(conn=None) -> dict:
             stats["pending"] += 1
             try:
                 outcome = await _answer(conn, cand, offer)
+            except Exception:  # one bad candidate never takes the tick down
+                stats["skipped"] += 1
+                continue
+            if outcome.startswith("acted"):
+                stats["answered"] += 1
+            else:
+                stats["skipped"] += 1
+
+        # Second scan: candidates where NOBODY has offered yet — open the negotiation (F6).
+        for cand, prop in _initial_candidates(conn):
+            if offers.latest_offer(conn, prop["id"]) is not None:
+                continue  # this very tick may have just created one for this proposal
+            actor = _initial_actor(conn, cand)
+            if actor is None:  # neither side delegated: silent, nothing to do
+                continue
+            stats["pending"] += 1
+            try:
+                outcome = await _autonomous_turn(
+                    conn,
+                    actor,
+                    f"initial:{cand['id']}",
+                    lambda actor=actor, cand=cand, prop=prop: _initial_context(
+                        conn, cand, prop, actor
+                    ),
+                    manual_note=False,  # there is no offer to answer by hand yet
+                )
             except Exception:  # one bad candidate never takes the tick down
                 stats["skipped"] += 1
                 continue

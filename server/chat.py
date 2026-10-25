@@ -17,11 +17,11 @@ Design rules that are load-bearing:
   * Notes in the transcript are SERVER-TEMPLATED FACTS built from structured fields only.
     Provider prose goes into `assistant` rows, never into `note` rows.
 
-CONTRACT seam note: the activity cores `activity.propose` / `activity.respond` open their own
-`db.immediate`; SQLite cannot nest `BEGIN IMMEDIATE`, so this module cannot wrap them. They are
-called directly and own their transaction; the pre-checks this module adds (deleted account,
-live delegation) run just before, and the core re-checks candidate/proposal/offer state inside
-its own transaction. Nothing here writes outside a `db.immediate`.
+Activity cores: `activity.propose` / `activity.respond` open their own `db.immediate`; SQLite
+cannot nest `BEGIN IMMEDIATE`, so this module cannot wrap them. The assistant path calls them
+with `autonomous=True` and they re-read the delegation grant and the account INSIDE that
+transaction (before any write), so the pre-checks here are advisory only. Every write in this
+module still happens inside a `db.immediate`.
 """
 from __future__ import annotations
 

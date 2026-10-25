@@ -310,6 +310,129 @@ def test_delegation_withdrawn_mid_stream_applies_nothing(client, monkeypatch):
     assert _contents(a) == []
 
 
+# ------------------------------------------------------------------ initial offers (F6)
+
+
+def _initial_reply(cid: int, version: int, tag: str = "coffee", url: str = URL):
+    return neg_reply(
+        {"op": "offer", "candidate_id": cid, "proposal_version": version, "tag": tag, "url": url}
+    )
+
+
+def _version(pid: int) -> int:
+    conn = db.connect()
+    try:
+        return int(db.one(conn, "SELECT version FROM proposals WHERE id=?", (pid,))["version"])
+    finally:
+        conn.close()
+
+
+def _only_offer(cid: int):
+    conn = db.connect()
+    try:
+        return db.one(conn, "SELECT * FROM activity_offers WHERE candidate_id=? ORDER BY id DESC", (cid,))
+    finally:
+        conn.close()
+
+
+def test_both_sides_delegated_means_exactly_one_opening_offer(client, monkeypatch):
+    """Deterministic: the LOWER uid opens, so a second scan cannot double-offer."""
+    a, b, cid, pid = _pair()
+    util.grant(a, "delegation")
+    util.grant(b, "delegation")
+    monkeypatch.setattr(chat.ai, "stream_reply", _initial_reply(cid, _version(pid)))
+
+    stats = _tick()
+
+    assert stats == {"pending": 1, "answered": 1, "skipped": 0}
+    assert _offer_count(cid) == 1
+    offer = _only_offer(cid)
+    assert offer["state"] == "offered"
+    assert offer["proposer_id"] == min(a, b), "the lower uid acts"
+
+    # budget: one row keyed to the candidate, not to an offer that did not exist
+    acting = min(a, b)
+    turns = _turn_rows(acting)
+    assert len(turns) == 1 and turns[0]["ref"] == f"initial:{cid}"
+
+    # a second scan in the same state offers NOTHING more
+    _tick()
+    assert _offer_count(cid) == 1
+
+    # next tick: the other side answers the offer the scan created
+    offer_id = offer["id"]
+    monkeypatch.setattr(chat.ai, "stream_reply", neg_reply({"op": "accept", "offer_id": offer_id}))
+    _tick()
+    assert _offer(offer_id)["state"] == "accepted"
+
+
+def test_one_side_delegated_offers_for_that_side_only(client, monkeypatch):
+    a, b, cid, pid = _pair()
+    util.grant(b, "delegation")  # only B
+    monkeypatch.setattr(chat.ai, "stream_reply", _initial_reply(cid, _version(pid)))
+
+    _tick()
+
+    offer = _only_offer(cid)
+    assert offer is not None and offer["proposer_id"] == b
+    assert _turn_rows(a) == [], "the side without delegation spends nothing"
+
+
+def test_neither_side_delegated_stays_silent(client, monkeypatch):
+    a, b, cid, pid = _pair()
+    monkeypatch.setattr(chat.ai, "stream_reply", _initial_reply(cid, _version(pid)))
+
+    stats = _tick()
+
+    assert stats == {"pending": 0, "answered": 0, "skipped": 0}
+    assert _offer_count(cid) == 0
+    assert _turn_rows(a) == [] and _turn_rows(b) == []
+    assert _contents(a) == [] and _contents(b) == []
+
+
+def test_initial_offer_prompt_carries_candidate_window_and_vocab(client, monkeypatch):
+    a, b, cid, pid = _pair()
+    util.grant(a, "delegation")
+    seen: list[str] = []
+    inner = _initial_reply(cid, _version(pid))
+
+    async def spy(system, messages, *, transport=None):
+        seen.append(system)
+        async for piece in inner(system, messages, transport=transport):
+            yield piece
+
+    monkeypatch.setattr(chat.ai, "stream_reply", spy)
+
+    _tick()
+
+    assert seen, "the worker must actually run a turn"
+    prompt = seen[0]
+    assert f'"candidate_id":{cid}' in prompt
+    assert '"shared_activity_tags":["climbing","coffee"]' in prompt
+    assert '"tag_vocabulary":[' in prompt
+    assert '"window":' in prompt
+
+
+def test_initial_offer_is_bounded_by_the_attempt_cap(client, monkeypatch):
+    a, b, cid, pid = _pair()
+    util.grant(a, "delegation")
+
+    async def broken(system, messages, *, transport=None):
+        raise ai.AIError("ai_timeout", "the provider took too long")
+        yield ""  # pragma: no cover
+
+    monkeypatch.setattr(chat.ai, "stream_reply", broken)
+
+    _tick()
+    _tick()
+    _tick()
+
+    turns = _turn_rows(a)
+    assert len(turns) == negotiate.MAX_ATTEMPTS, "the opening offer has its own two attempts"
+    assert {row["ref"] for row in turns} == {f"initial:{cid}"}
+    assert _offer_count(cid) == 0
+
+
 # ------------------------------------------------------------------ bounds
 
 
